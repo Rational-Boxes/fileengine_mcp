@@ -94,12 +94,13 @@ def test_version_resource_time_travel():
     server.mf.remove(d)
 
 
-def test_phase1_surface_is_read_only():
-    """All Phase 1 tools are reads; no mutating or version-culling tool exists."""
+def test_read_tools_present_and_no_culling():
+    """The read surface is always available, and no version-culling or hard-delete
+    tool exists under the default config (the recoverability invariant)."""
     from fileengine_mcp import server
     tools = asyncio.run(server.server.list_tools())
     names = {t.name for t in tools}
-    expected = {"list_directory", "read_file", "stat", "exists",
-                "list_versions", "read_version", "get_metadata", "check_permission"}
-    assert names == expected, names
-    assert not any(k in n for n in names for k in ("purge", "write", "delete", "create", "remove", "restore"))
+    read_tools = {"list_directory", "read_file", "stat", "exists",
+                  "list_versions", "read_version", "get_metadata", "check_permission"}
+    assert read_tools <= names
+    assert not any("purge" in n or "cull" in n or "hard" in n for n in names)

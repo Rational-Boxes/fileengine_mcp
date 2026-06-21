@@ -31,6 +31,8 @@ class Config:
         # Tenant (one per stdio process) and mode
         self.tenant = _env("FILEENGINE_MCP_TENANT", "default")
         self.read_only = _env("MCP_READ_ONLY", "0").lower() in ("1", "true", "yes")
+        # Soft delete / undelete are append-only-safe (reversible) but still gated.
+        self.allow_delete = _env("MCP_ALLOW_DELETE", "0").lower() in ("1", "true", "yes")
 
         # LDAP — the authentication and role authority (mirrors the bridges)
         self.ldap_uri = _env("FILEENGINE_LDAP_ENDPOINT", "ldap://localhost:1389")

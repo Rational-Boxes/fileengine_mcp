@@ -59,10 +59,11 @@ def test_read_file_roundtrip():
     mf.remove(d)
 
 
-def test_phase0_exposes_only_read_tools():
-    """Immutability guard: no mutating or version-culling tool in Phase 0."""
+def test_no_version_culling_or_hard_delete_tool():
+    """Recoverability invariant: no version-culling or hard-delete tool is ever
+    exposed on the agent surface, regardless of write/delete config."""
+    import asyncio
     from fileengine_mcp import server
-    forbidden = {"purge", "purge_old_versions", "write_file", "delete_file",
-                 "remove", "create_file", "create_directory", "restore_version"}
-    exposed = {n for n in dir(server) if callable(getattr(server, n)) and not n.startswith("_")}
-    assert not (exposed & forbidden), f"unexpected mutating tool(s): {exposed & forbidden}"
+    names = {t.name for t in asyncio.run(server.server.list_tools())}
+    assert not any("purge" in n or "cull" in n or "hard_delete" in n for n in names)
+    assert "purge_old_versions" not in names
