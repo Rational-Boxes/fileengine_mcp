@@ -16,6 +16,7 @@ from ._client import ManagedFiles
 class Session:
     identity: Identity
     mf: ManagedFiles
+    label: str = "http"   # audit session label (e.g. the MCP session id)
 
 
 _current: "contextvars.ContextVar[Optional[Session]]" = contextvars.ContextVar(

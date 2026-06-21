@@ -54,7 +54,8 @@ class AuthMiddleware:
         if identity is None or not identity.authenticated:
             return await _UNAUTH(scope, receive, send)
 
-        token = set_session(Session(identity, mf_for(identity, self.config)))
+        label = headers.get("mcp-session-id") or "http"
+        token = set_session(Session(identity, mf_for(identity, self.config), label=label))
         try:
             await self.app(scope, receive, send)
         finally:

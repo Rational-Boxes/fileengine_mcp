@@ -7,11 +7,12 @@ authorization go through **LDAP** (the gRPC core enforces ACLs).
 
 See **[`DESIGN.md`](./DESIGN.md)** for the full design and roadmap.
 
-## Status — Phase 3 (Streamable HTTP transport)
+## Status — Phase 4 (hardening + guardrails)
 
 MCP server over **stdio** *and* **Streamable HTTP**, with LDAP-resolved identity,
-the full read surface, browsable version-aware resources, and **append-only**
-write tools.
+the full read surface, browsable version-aware resources, **append-only** write
+tools, and a guardrail/audit layer that sandboxes an agent without ever granting
+access the core would deny.
 
 **Read tools (8, always on):** `list_directory`, `read_file`, `stat`, `exists`,
 `list_versions`, `read_version` (time-travel), `get_metadata`, `check_permission`.
@@ -32,8 +33,30 @@ readable via `read_version`.
 
 Reuses `python_interface`'s `ManagedFiles`. **Version culling
 (`PurgeOldVersions`) and hard delete are never exposed under any flag or role** —
-the recoverability guarantee. Next: Phase 4 hardening (audit log, size/result
-caps, subtree allow-list, confirmation hints).
+the recoverability guarantee. Next: Phase 5 packaging (container image, tool
+reference, example agent config).
+
+## Hardening & guardrails
+
+Layered *on top of* the LDAP/ACL decision in the core (they sandbox an agent;
+they never grant access the core would deny):
+
+- **Audit log** — every tool call emits one JSON line `{ts, user, session,
+  tenant, tool, uid, result}` (`ok`/`denied`/`error`) to `MCP_AUDIT_LOG_FILE`
+  or stderr. Content bytes, passwords, and tokens are never logged.
+- **Size caps** — `MCP_MAX_READ_BYTES` / `MCP_MAX_WRITE_BYTES` reject oversized
+  reads/writes (a rejected write never reaches the core, so no version is added).
+- **Result cap** — `MCP_MAX_RESULTS` truncates long listings (with a notice row).
+- **Subtree allow-list** — `MCP_SUBTREE_ALLOWLIST` (UIDs) sandboxes an agent to a
+  subtree; operations outside it are denied and audited.
+- **Confirmation hints** — tools carry `readOnlyHint` (reads) /
+  `destructiveHint` / `idempotentHint` so MCP hosts can prompt before mutations.
+
+Because every write is append-only and the soft-delete is reversible, **any
+agent mistake is recoverable** with the tools the agent already has — a chaotic
+write→rename→move→delete sequence rolls back to a pre-run snapshot
+(`restore_version` + reverse `rename`/`move` + `undelete`), verified in the test
+suite.
 
 ## Transports
 
@@ -80,6 +103,12 @@ stdio with the LDAP credentials in its environment.
 | `FILEENGINE_LDAP_*` | LDAP endpoint / domain / bind / bases |
 | `MCP_READ_ONLY` | `1` hides all write tools (read/browse only); default `0` |
 | `MCP_ALLOW_DELETE` | `1` enables reversible `soft_delete`/`undelete`; default `0` |
+| `MCP_HTTP_HOST` / `_PORT` | Streamable HTTP bind address (default `127.0.0.1:8089`) |
+| `MCP_TOKEN_TTL` | bearer-token lifetime in seconds (default `3600`) |
+| `MCP_MAX_READ_BYTES` / `_WRITE_BYTES` | per-call size caps (default 10 MiB; `0` disables) |
+| `MCP_MAX_RESULTS` | max directory entries per listing (default `1000`) |
+| `MCP_SUBTREE_ALLOWLIST` | comma-separated UIDs to sandbox an agent (empty = unrestricted) |
+| `MCP_AUDIT_LOG_FILE` | audit log file path (empty = stderr) |
 
 ## Test
 

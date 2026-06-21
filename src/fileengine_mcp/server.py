@@ -12,13 +12,19 @@ The surface is built around the recoverability guarantee (see DESIGN.md):
 - Version culling (PurgeOldVersions) and hard delete are **never** exposed,
   under any flag or role."""
 import base64
+import functools
+import inspect
 import sys
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
+from . import audit
 from .config import Config, load_dotenv
+from .guards import (GuardError, cap_read_bytes, cap_results, cap_write_bytes,
+                     within_allowlist)
 from .ldap_auth import authenticate
-from .session import get_session_mf
+from .session import get_session, get_session_mf
 from ._client import ManagedFiles
 
 ROOT_ALIASES = {"root", "", "00000000-0000-0000-0000-000000000000"}
@@ -55,7 +61,9 @@ def _read_version_bytes(uid: str, version: str) -> bytes:
     buf = _mf().get(_norm_uid(uid), back=versions.index(version))
     if buf is False:
         raise ValueError(f"could not read version '{version}' of '{uid}'")
-    return buf.getvalue()
+    data = buf.getvalue()
+    cap_read_bytes(data, config.max_read_bytes)
+    return data
 
 
 # --- build the server (auth + gRPC connection happen once at startup) ---
@@ -84,18 +92,109 @@ def _mf():
     return get_session_mf() or mf
 
 
-@server.tool()
+audit.configure(config.audit_log_file)
+
+# UID-bearing parameter names — the targets a guardrail/audit cares about.
+_UID_PARAMS = ("uid", "parent_uid", "destination_parent_uid")
+
+
+def _active_identity():
+    sess = get_session()
+    return sess.identity if sess else identity
+
+
+def _active_label() -> str:
+    sess = get_session()
+    return sess.label if sess else "stdio"
+
+
+def _parent_of(uid: str):
+    """Parent UID of an entity (for subtree containment), or None at the root."""
+    info = _mf().stat(_norm_uid(uid))
+    if info is None:
+        return None
+    parent = info.parent_uid
+    return None if parent in ROOT_ALIASES else parent
+
+
+def _check_subtree(uids) -> None:
+    """Enforce the optional subtree allow-list against every target UID."""
+    if not config.subtree_allowlist:
+        return
+    for uid in uids:
+        if not within_allowlist(_norm_uid(uid), config.subtree_allowlist,
+                                parent_of=_parent_of, root_uid=""):
+            raise GuardError(f"'{uid}' is outside the allowed subtree")
+
+
+def guarded(tool_name: str):
+    """Wrap a tool with subtree enforcement + audit (ok|denied|error).
+
+    ``functools.wraps`` keeps the original signature so FastMCP still derives the
+    input schema from the wrapped function."""
+    def deco(fn):
+        sig = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            targets = [str(bound.arguments[p]) for p in _UID_PARAMS if p in bound.arguments]
+            uid = targets[0] if targets else ""
+            ident = _active_identity()
+            try:
+                _check_subtree(targets)
+                result = fn(*args, **kwargs)
+            except GuardError as e:
+                audit.record(tool=tool_name, uid=uid, result="denied", user=ident.user,
+                             tenant=ident.tenant, session=_active_label(), reason=str(e))
+                raise
+            except Exception as e:
+                audit.record(tool=tool_name, uid=uid, result="error", user=ident.user,
+                             tenant=ident.tenant, session=_active_label(),
+                             reason=type(e).__name__)
+                raise
+            audit.record(tool=tool_name, uid=uid, result="ok", user=ident.user,
+                         tenant=ident.tenant, session=_active_label())
+            return result
+
+        return wrapper
+
+    return deco
+
+
+# Confirmation hints for MCP hosts. Reads are read-only; writes are mutating but
+# (by design) recoverable, so none is truly "destructive" — only soft_delete is
+# flagged so hosts prompt, even though it too is reversible via undelete.
+_READ_HINT = ToolAnnotations(readOnlyHint=True)
+_WRITE_HINTS = {
+    "create_directory": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
+    "create_file": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
+    "write_file": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
+    "set_metadata": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+    "delete_metadata": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+    "rename": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+    "move": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+    "copy": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
+    "restore_version": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
+    "soft_delete": ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),
+    "undelete": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+}
+
+
+@server.tool(annotations=_READ_HINT)
+@guarded("list_directory")
 def list_directory(uid: str = "root", show_deleted: bool = False) -> list[dict]:
     """List the contents of a directory by UID.
 
     Use ``root`` (or the all-zeros UUID) for the filesystem root. Set
     ``show_deleted`` to include soft-deleted entries (useful before ``undelete``).
     Returns each entry's uid, name, type (file|directory), size, and
-    version_count."""
+    version_count. Long listings are capped at ``MCP_MAX_RESULTS`` entries."""
     entries = _mf().dir(_norm_uid(uid), show_deleted=show_deleted)
     if entries is False:
         raise ValueError(f"could not list directory '{uid}'")
-    return [
+    rows = [
         {
             "uid": e.uid,
             "name": e.name,
@@ -105,21 +204,30 @@ def list_directory(uid: str = "root", show_deleted: bool = False) -> list[dict]:
         }
         for e in entries
     ]
+    rows, truncated = cap_results(rows, config.max_results)
+    if truncated:
+        rows.append({"uid": "", "name": f"[truncated at MCP_MAX_RESULTS={config.max_results}]",
+                     "type": "notice", "size": 0, "version_count": 0})
+    return rows
 
 
-@server.tool()
+@server.tool(annotations=_READ_HINT)
+@guarded("read_file")
 def read_file(uid: str) -> str:
     """Read the current content of a file by UID, returned as UTF-8 text.
 
     Binary content that is not valid UTF-8 is returned base64-encoded with a
-    ``[base64]`` prefix."""
+    ``[base64]`` prefix. Content over ``MCP_MAX_READ_BYTES`` is rejected."""
     buf = _mf().get(_norm_uid(uid))
     if buf is False:
         raise ValueError(f"could not read file '{uid}'")
-    return _content_to_text(buf.getvalue())
+    data = buf.getvalue()
+    cap_read_bytes(data, config.max_read_bytes)
+    return _content_to_text(data)
 
 
-@server.tool()
+@server.tool(annotations=_READ_HINT)
+@guarded("stat")
 def stat(uid: str) -> dict:
     """Get metadata for a file or directory: type, size, owner, parent, and the
     current version timestamp."""
@@ -137,13 +245,15 @@ def stat(uid: str) -> dict:
     }
 
 
-@server.tool()
+@server.tool(annotations=_READ_HINT)
+@guarded("exists")
 def exists(uid: str) -> bool:
     """Return whether a file or directory exists."""
     return bool(_mf().entity_exists(_norm_uid(uid)))
 
 
-@server.tool()
+@server.tool(annotations=_READ_HINT)
+@guarded("list_versions")
 def list_versions(uid: str) -> list[str]:
     """List the version timestamps of a file, newest first.
 
@@ -152,14 +262,16 @@ def list_versions(uid: str) -> list[str]:
     return [r.version for r in _mf().revisions(_norm_uid(uid))]
 
 
-@server.tool()
+@server.tool(annotations=_READ_HINT)
+@guarded("read_version")
 def read_version(uid: str, version: str) -> str:
     """Time-travel read: return a file's content at a specific version timestamp
     (from list_versions), as UTF-8 text (base64 fallback)."""
     return _content_to_text(_read_version_bytes(uid, version))
 
 
-@server.tool()
+@server.tool(annotations=_READ_HINT)
+@guarded("get_metadata")
 def get_metadata(uid: str, key: str | None = None) -> dict:
     """Get metadata for a file. With a key, returns ``{key: value}``; without,
     returns all metadata as a map."""
@@ -169,7 +281,8 @@ def get_metadata(uid: str, key: str | None = None) -> dict:
     return _mf().get_metadata_values(_norm_uid(uid))
 
 
-@server.tool()
+@server.tool(annotations=_READ_HINT)
+@guarded("check_permission")
 def check_permission(uid: str, permission: str, principal: str | None = None) -> bool:
     """Check whether a principal has a permission on a resource. ``permission``
     is a letter (r/w/x/d/...) or name (READ/WRITE/...); ``principal`` defaults to
@@ -203,6 +316,7 @@ def version_resource(tenant: str, uid: str, version: str) -> str:
 # --- write tools: append-only. Defined unconditionally so they are importable
 #     and unit-testable; only *registered* on the agent surface when writes are
 #     enabled (hidden entirely in MCP_READ_ONLY mode). -----------------------
+@guarded("create_directory")
 def create_directory(parent_uid: str, name: str) -> str:
     """Create a new directory under a parent and return its UID."""
     uid = _mf().mkdir(_norm_uid(parent_uid), name)
@@ -211,6 +325,7 @@ def create_directory(parent_uid: str, name: str) -> str:
     return uid
 
 
+@guarded("create_file")
 def create_file(parent_uid: str, name: str) -> str:
     """Create a new (empty) file under a parent and return its UID.
 
@@ -221,12 +336,16 @@ def create_file(parent_uid: str, name: str) -> str:
     return uid
 
 
+@guarded("write_file")
 def write_file(uid: str, content: str, as_: str = "text") -> dict:
     """Write file content. This is **append-only**: it adds a new version and
     never overwrites or erases prior versions (recoverable via list_versions /
-    read_version / restore_version). ``as_`` is ``text`` or ``base64``."""
+    read_version / restore_version). ``as_`` is ``text`` or ``base64``. Payloads
+    over ``MCP_MAX_WRITE_BYTES`` are rejected."""
+    payload = _content_from_text(content, as_)
+    cap_write_bytes(payload, config.max_write_bytes)
     before = len(_mf().revisions(_norm_uid(uid)))
-    ok = _mf().put(_norm_uid(uid), _content_from_text(content, as_))
+    ok = _mf().put(_norm_uid(uid), payload)
     if ok is False:
         raise ValueError(f"could not write file '{uid}'")
     versions = [r.version for r in _mf().revisions(_norm_uid(uid))]
@@ -234,32 +353,38 @@ def write_file(uid: str, content: str, as_: str = "text") -> dict:
             "current_version": versions[0] if versions else None}
 
 
+@guarded("set_metadata")
 def set_metadata(uid: str, key: str, value: str) -> bool:
     """Set a metadata key/value on a file or directory."""
     return bool(_mf().set_metadata_value(_norm_uid(uid), key, value))
 
 
+@guarded("delete_metadata")
 def delete_metadata(uid: str, key: str) -> bool:
     """Remove a metadata key. Metadata only — does not touch file content or
     its version history."""
     return bool(_mf().delete_metadata_value(_norm_uid(uid), key))
 
 
+@guarded("rename")
 def rename(uid: str, new_name: str) -> bool:
     """Rename a file or directory in place."""
     return bool(_mf().rename(_norm_uid(uid), new_name))
 
 
+@guarded("move")
 def move(uid: str, destination_parent_uid: str) -> bool:
     """Move a file or directory under a new parent directory."""
     return bool(_mf().move(_norm_uid(uid), _norm_uid(destination_parent_uid)))
 
 
+@guarded("copy")
 def copy(uid: str, destination_parent_uid: str) -> bool:
     """Copy a file or directory into a destination directory."""
     return bool(_mf().copy(_norm_uid(uid), _norm_uid(destination_parent_uid)))
 
 
+@guarded("restore_version")
 def restore_version(uid: str, version: str) -> dict:
     """Restore a file to a prior version (from list_versions). This is
     **append-only**: it adds a new version equal to the chosen one; nothing is
@@ -271,6 +396,7 @@ def restore_version(uid: str, version: str) -> dict:
 
 
 # Soft delete / undelete — reversible, but gated behind MCP_ALLOW_DELETE.
+@guarded("soft_delete")
 def soft_delete(uid: str) -> bool:
     """Soft-delete (hide) a file or directory. Reversible with ``undelete``:
     the entity and its full version history persist. No hard delete and no
@@ -278,6 +404,7 @@ def soft_delete(uid: str) -> bool:
     return bool(_mf().remove(_norm_uid(uid)))
 
 
+@guarded("undelete")
 def undelete(uid: str) -> bool:
     """Restore a soft-deleted file (pairs with ``soft_delete``)."""
     return bool(_mf().undelete_file(_norm_uid(uid)))
@@ -289,10 +416,10 @@ _DELETE_TOOLS = (soft_delete, undelete)
 
 if not config.read_only:
     for _fn in _WRITE_TOOLS:
-        server.add_tool(_fn)
+        server.add_tool(_fn, annotations=_WRITE_HINTS.get(_fn.__name__))
     if config.allow_delete:
         for _fn in _DELETE_TOOLS:
-            server.add_tool(_fn)
+            server.add_tool(_fn, annotations=_WRITE_HINTS.get(_fn.__name__))
 
 
 def _banner(transport: str) -> None:

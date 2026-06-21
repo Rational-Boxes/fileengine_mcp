@@ -39,6 +39,17 @@ class Config:
         self.http_port = int(_env("MCP_HTTP_PORT", "8089"))
         self.token_ttl = int(_env("MCP_TOKEN_TTL", "3600"))
 
+        # Hardening / guardrails — layered on top of the LDAP/ACL decision, never
+        # replacing it. Caps are per call; the allow-list sandboxes an agent to a
+        # subtree (empty = unrestricted). Audit goes to a file or stderr.
+        self.max_read_bytes = int(_env("MCP_MAX_READ_BYTES", str(10 * 1024 * 1024)))
+        self.max_write_bytes = int(_env("MCP_MAX_WRITE_BYTES", str(10 * 1024 * 1024)))
+        self.max_results = int(_env("MCP_MAX_RESULTS", "1000"))
+        self.subtree_allowlist = [
+            u.strip() for u in _env("MCP_SUBTREE_ALLOWLIST", "").split(",") if u.strip()
+        ]
+        self.audit_log_file = _env("MCP_AUDIT_LOG_FILE", "")
+
         # LDAP — the authentication and role authority (mirrors the bridges)
         self.ldap_uri = _env("FILEENGINE_LDAP_ENDPOINT", "ldap://localhost:1389")
         self.ldap_domain = _env("FILEENGINE_LDAP_DOMAIN", "dc=rationalboxes,dc=com")
