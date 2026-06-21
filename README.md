@@ -7,12 +7,15 @@ authorization go through **LDAP** (the gRPC core enforces ACLs).
 
 See **[`DESIGN.md`](./DESIGN.md)** for the full design and roadmap.
 
-## Status — Phase 4 (hardening + guardrails)
+## Status — Phase 5 (packaging + docs) · feature-complete
 
 MCP server over **stdio** *and* **Streamable HTTP**, with LDAP-resolved identity,
 the full read surface, browsable version-aware resources, **append-only** write
-tools, and a guardrail/audit layer that sandboxes an agent without ever granting
-access the core would deny.
+tools, a guardrail/audit hardening layer, a container image, a generated
+[tool reference](./TOOLS.md), and a runnable [example agent](./examples/) — all
+six design phases complete. The product guarantee — *a storage service that can
+always be restored regardless of any AI mistake* — is enforced structurally and
+proven end-to-end in the test suite.
 
 **Read tools (8, always on):** `list_directory`, `read_file`, `stat`, `exists`,
 `list_versions`, `read_version` (time-travel), `get_metadata`, `check_permission`.
@@ -33,8 +36,21 @@ readable via `read_version`.
 
 Reuses `python_interface`'s `ManagedFiles`. **Version culling
 (`PurgeOldVersions`) and hard delete are never exposed under any flag or role** —
-the recoverability guarantee. Next: Phase 5 packaging (container image, tool
-reference, example agent config).
+the recoverability guarantee.
+
+See the full [tool & resource reference](./TOOLS.md) (regenerate with
+`python scripts/gen_tool_reference.py`) and [`examples/`](./examples/) for MCP
+host configs and a runnable demo.
+
+## Container image
+
+The server reuses the sibling `python_interface` client, so build with the
+**parent** directory as context:
+
+```bash
+docker build -f mcp/Dockerfile -t fileengine-mcp ..
+docker run --rm -p 8089:8089 --env-file mcp/.env fileengine-mcp   # Streamable HTTP
+```
 
 ## Hardening & guardrails
 

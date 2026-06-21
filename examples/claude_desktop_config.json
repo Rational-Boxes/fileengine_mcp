@@ -1,0 +1,19 @@
+{
+  "//": "Claude Desktop / MCP host config — stdio transport. Add to claude_desktop_config.json under 'mcpServers'. The host launches the server and reads the LDAP credentials + core endpoint from env. Adjust paths to your checkout.",
+  "mcpServers": {
+    "fileengine": {
+      "command": "fileengine-mcp",
+      "env": {
+        "FILEENGINE_GRPC_HOST": "localhost",
+        "FILEENGINE_GRPC_PORT": "50051",
+        "FILEENGINE_MCP_TENANT": "default",
+        "FILEENGINE_MCP_USER": "agent-service-account",
+        "FILEENGINE_MCP_PASSWORD": "CHANGEME",
+        "FILEENGINE_LDAP_ENDPOINT": "ldap://localhost:1389",
+        "MCP_READ_ONLY": "0",
+        "MCP_ALLOW_DELETE": "0",
+        "MCP_AUDIT_LOG_FILE": "/var/log/fileengine-mcp-audit.log"
+      }
+    }
+  }
+}
