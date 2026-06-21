@@ -5,10 +5,10 @@
 FileEngine **immutable, versioned filesystem** as tools and resources for AI
 agents.
 
-> Note: the protocol is the **Model Context Protocol** (MCP) — Anthropic's open
-> standard for connecting LLM agents to tools and data. This server is an MCP
-> *server*; agents (Claude Desktop, IDE assistants, custom agent runtimes) are
-> the MCP *clients*.
+> The **Model Context Protocol** (MCP) is Anthropic's open standard for
+> connecting LLM agents to tools and data. This component is an MCP *server*;
+> agents (Claude Desktop, IDE assistants, custom agent runtimes) are the MCP
+> *clients*.
 
 ---
 
