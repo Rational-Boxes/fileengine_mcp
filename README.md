@@ -7,16 +7,22 @@ authorization go through **LDAP** (the gRPC core enforces ACLs).
 
 See **[`DESIGN.md`](./DESIGN.md)** for the full design and roadmap.
 
-## Status — Phase 0 (scaffold)
+## Status — Phase 1 (full read surface)
 
-Stdio MCP server with LDAP-resolved identity and the first read tools:
+Stdio MCP server with LDAP-resolved identity and the complete read tool set plus
+browsable, version-aware resources.
 
-- `list_directory(uid="root")` — directory entries
-- `read_file(uid)` — current file content (text; base64 fallback)
+**Tools (8, all read):** `list_directory`, `read_file`, `stat`, `exists`,
+`list_versions`, `read_version` (time-travel), `get_metadata`, `check_permission`.
 
-Reuses `python_interface`'s `ManagedFiles` client. Version-culling and hard
-delete are **never** exposed (the immutability guarantee); write tools arrive in
-Phase 2.
+**Resources:**
+- `fileengine://{tenant}/{uid}` — current file content
+- `fileengine://{tenant}/{uid}/versions` — the immutable version history
+- `fileengine://{tenant}/{uid}/versions/{version}` — content at a past version
+
+Reuses `python_interface`'s `ManagedFiles`. Version-culling and hard delete are
+**never** exposed (the recoverability guarantee); append-only write tools arrive
+in Phase 2.
 
 ## Install & run
 
