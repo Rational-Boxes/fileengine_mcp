@@ -1,0 +1,25 @@
+[project]
+name = "fileengine-mcp"
+version = "0.1.0"
+description = "Model Context Protocol server exposing the FileEngine immutable, versioned filesystem to AI agents"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0",
+    "ldap3>=2.9",
+    "grpcio>=1.50",
+    "protobuf>=4.21",
+    "pydantic>=2.0",
+]
+# The FileEngine Python client (`fileengine`, from ../python_interface) is
+# reused at runtime. Install it (`pip install ../python_interface`) or rely on
+# the sibling-checkout bootstrap in fileengine_mcp._client.
+
+[project.scripts]
+fileengine-mcp = "fileengine_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
