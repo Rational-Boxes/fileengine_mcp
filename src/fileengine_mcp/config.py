@@ -34,6 +34,11 @@ class Config:
         # Soft delete / undelete are append-only-safe (reversible) but still gated.
         self.allow_delete = _env("MCP_ALLOW_DELETE", "0").lower() in ("1", "true", "yes")
 
+        # Streamable HTTP transport (remote/multi-agent; run behind TLS).
+        self.http_host = _env("MCP_HTTP_HOST", "127.0.0.1")
+        self.http_port = int(_env("MCP_HTTP_PORT", "8089"))
+        self.token_ttl = int(_env("MCP_TOKEN_TTL", "3600"))
+
         # LDAP — the authentication and role authority (mirrors the bridges)
         self.ldap_uri = _env("FILEENGINE_LDAP_ENDPOINT", "ldap://localhost:1389")
         self.ldap_domain = _env("FILEENGINE_LDAP_DOMAIN", "dc=rationalboxes,dc=com")

@@ -9,6 +9,8 @@ dependencies = [
     "grpcio>=1.50",
     "protobuf>=4.21",
     "pydantic>=2.0",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
 ]
 # The FileEngine Python client (`fileengine`, from ../python_interface) is
 # reused at runtime. Install it (`pip install ../python_interface`) or rely on
@@ -16,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 fileengine-mcp = "fileengine_mcp.server:main"
+fileengine-mcp-http = "fileengine_mcp.server:main_http"
 
 [build-system]
 requires = ["setuptools>=61"]
