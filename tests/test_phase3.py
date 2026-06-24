@@ -10,6 +10,12 @@ os.environ.setdefault("FILEENGINE_MCP_USER", "testuser")
 os.environ.setdefault("FILEENGINE_MCP_PASSWORD", "password")
 os.environ.setdefault("FILEENGINE_MCP_TENANT", "default")
 
+# The configured agent identity — what the server authenticates as and what
+# _services_up() checks. Tests assert against this rather than a hardcoded
+# literal so they track whatever test LDAP user the environment provides.
+_USER = os.environ["FILEENGINE_MCP_USER"]
+_PASS = os.environ["FILEENGINE_MCP_PASSWORD"]
+
 
 # --------------------------- unit: no services needed ---------------------------
 def test_token_store_issue_resolve_and_expiry():
@@ -99,15 +105,15 @@ def client():
         yield c
 
 
-def _basic(user="testuser", pw="password"):
+def _basic(user=_USER, pw=_PASS):
     import base64
     return {"Authorization": "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()}
 
 
 @live
 def test_token_endpoint_and_whoami(client):
-    assert client.post("/auth/token", json={"username": "testuser", "password": "wrong"}).status_code == 401
-    r = client.post("/auth/token", json={"username": "testuser", "password": "password"})
+    assert client.post("/auth/token", json={"username": _USER, "password": "wrong"}).status_code == 401
+    r = client.post("/auth/token", json={"username": _USER, "password": _PASS})
     assert r.status_code == 200
     token = r.json()["access_token"]
     assert r.json()["token_type"] == "bearer"
@@ -116,7 +122,7 @@ def test_token_endpoint_and_whoami(client):
     who = client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
     assert who.status_code == 200
     body = who.json()
-    assert body["user"] == "testuser"
+    assert body["user"] == _USER
     assert "administrators" in body["roles"] and "system_admin" in body["roles"]
     assert body["tenant"] == "default"
 

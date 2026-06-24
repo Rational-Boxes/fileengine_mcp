@@ -13,6 +13,26 @@ os.environ.setdefault("FILEENGINE_MCP_USER", "testuser")
 os.environ.setdefault("FILEENGINE_MCP_PASSWORD", "password")
 os.environ.setdefault("FILEENGINE_MCP_TENANT", "default")
 
+# The configured agent identity — audit records attribute tool calls to this
+# user. Assert against it rather than a hardcoded literal.
+_USER = os.environ["FILEENGINE_MCP_USER"]
+
+
+# Importing fileengine_mcp.server authenticates the agent against LDAP at import
+# time, so any test that imports it is an integration test. Define the live gate
+# up front so those tests can be skipped when LDAP/core aren't reachable.
+def _services_up() -> bool:
+    try:
+        from fileengine_mcp.config import Config
+        from fileengine_mcp.ldap_auth import authenticate
+        cfg = Config()
+        return authenticate(cfg, cfg.agent_user, cfg.agent_password).authenticated
+    except Exception:
+        return False
+
+
+live = pytest.mark.skipif(not _services_up(), reason="LDAP/core not reachable")
+
 
 # ------------------------------ unit: guards ------------------------------
 def test_byte_and_result_caps():
@@ -58,6 +78,7 @@ def test_audit_record_is_structured_and_secret_free():
         audit.configure("")  # detach the temp file
 
 
+@live
 def test_confirmation_hint_annotations():
     from fileengine_mcp import server
     tools = {t.name: t for t in asyncio.run(server.server.list_tools())}
@@ -68,17 +89,6 @@ def test_confirmation_hint_annotations():
 
 
 # --------------------------- integration: live ---------------------------
-def _services_up() -> bool:
-    try:
-        from fileengine_mcp.config import Config
-        from fileengine_mcp.ldap_auth import authenticate
-        cfg = Config()
-        return authenticate(cfg, cfg.agent_user, cfg.agent_password).authenticated
-    except Exception:
-        return False
-
-
-live = pytest.mark.skipif(not _services_up(), reason="LDAP/core not reachable")
 
 
 def _tree(server, tag):
@@ -138,7 +148,7 @@ def test_audit_emitted_for_tool_call():
         audit.configure(server.config.audit_log_file)
     entries = [json.loads(ln[len("audit "):]) for ln in open(path).read().splitlines() if ln.startswith("audit ")]
     rec = [e for e in entries if e["tool"] == "read_file" and e["uid"] == f]
-    assert rec and rec[-1]["result"] == "ok" and rec[-1]["user"] == "testuser"
+    assert rec and rec[-1]["result"] == "ok" and rec[-1]["user"] == _USER
     server.mf.remove(f); server.mf.remove(a); server.mf.remove(b)
 
 
