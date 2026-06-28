@@ -1,5 +1,7 @@
 # FileEngine MCP Server
 
+> ⚠️ **Active development — not production-ready.** This project is under active development and should **not** be considered safe for mission-critical use.
+
 A **Model Context Protocol (MCP)** server that exposes the FileEngine immutable,
 versioned filesystem to AI agents — a storage service that can **always be
 restored to any prior state regardless of agent mistakes**. Authentication and
