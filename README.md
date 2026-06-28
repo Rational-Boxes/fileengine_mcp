@@ -133,3 +133,10 @@ Requires a live LDAP + FileEngine core (skips otherwise):
 ```bash
 PYTHONPATH=src:../python_interface python -m pytest tests -v
 ```
+
+## License
+
+Copyright (C) 2026 James Hickman <james@rationalboxes.com>
+
+This project is licensed under the **GNU General Public License, version 3 (or
+later)** — see the [LICENSE](LICENSE) file for the full text.
