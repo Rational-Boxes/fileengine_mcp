@@ -25,7 +25,7 @@ from .guards import (GuardError, cap_read_bytes, cap_results, cap_write_bytes,
                      within_allowlist)
 from .ldap_auth import authenticate
 from .session import get_session, get_session_mf
-from ._client import ManagedFiles
+from ._client import ManagedFiles, NotFoundError
 
 ROOT_ALIASES = {"root", "", "00000000-0000-0000-0000-000000000000"}
 
@@ -59,8 +59,6 @@ def _read_version_bytes(uid: str, version: str) -> bytes:
     if version not in versions:
         raise ValueError(f"version '{version}' not found for '{uid}'")
     buf = _mf().get(_norm_uid(uid), back=versions.index(version))
-    if buf is False:
-        raise ValueError(f"could not read version '{version}' of '{uid}'")
     data = buf.getvalue()
     cap_read_bytes(data, config.max_read_bytes)
     return data
@@ -109,9 +107,11 @@ def _active_label() -> str:
 
 
 def _parent_of(uid: str):
-    """Parent UID of an entity (for subtree containment), or None at the root."""
-    info = _mf().stat(_norm_uid(uid))
-    if info is None:
+    """Parent UID of an entity (for subtree containment), or None at the root
+    or when the entity does not exist."""
+    try:
+        info = _mf().stat(_norm_uid(uid))
+    except NotFoundError:
         return None
     parent = info.parent_uid
     return None if parent in ROOT_ALIASES else parent
@@ -192,8 +192,6 @@ def list_directory(uid: str = "root", show_deleted: bool = False) -> list[dict]:
     Returns each entry's uid, name, type (file|directory), size, and
     version_count. Long listings are capped at ``MCP_MAX_RESULTS`` entries."""
     entries = _mf().dir(_norm_uid(uid), show_deleted=show_deleted)
-    if entries is False:
-        raise ValueError(f"could not list directory '{uid}'")
     rows = [
         {
             "uid": e.uid,
@@ -219,8 +217,6 @@ def read_file(uid: str) -> str:
     Binary content that is not valid UTF-8 is returned base64-encoded with a
     ``[base64]`` prefix. Content over ``MCP_MAX_READ_BYTES`` is rejected."""
     buf = _mf().get(_norm_uid(uid))
-    if buf is False:
-        raise ValueError(f"could not read file '{uid}'")
     data = buf.getvalue()
     cap_read_bytes(data, config.max_read_bytes)
     return _content_to_text(data)
@@ -232,8 +228,6 @@ def stat(uid: str) -> dict:
     """Get metadata for a file or directory: type, size, owner, parent, and the
     current version timestamp."""
     info = _mf().stat(_norm_uid(uid))
-    if info is None:
-        raise ValueError(f"could not stat '{uid}'")
     return {
         "uid": info.uid,
         "name": info.name,
@@ -295,8 +289,6 @@ def check_permission(uid: str, permission: str, principal: str | None = None) ->
 def file_resource(tenant: str, uid: str) -> str:
     """Current content of a file as a readable resource."""
     buf = _mf().get(_norm_uid(uid))
-    if buf is False:
-        raise ValueError(f"could not read file '{uid}'")
     return _content_to_text(buf.getvalue())
 
 
@@ -319,10 +311,7 @@ def version_resource(tenant: str, uid: str, version: str) -> str:
 @guarded("create_directory")
 def create_directory(parent_uid: str, name: str) -> str:
     """Create a new directory under a parent and return its UID."""
-    uid = _mf().mkdir(_norm_uid(parent_uid), name)
-    if uid is False:
-        raise ValueError(f"could not create directory '{name}' under '{parent_uid}'")
-    return uid
+    return _mf().mkdir(_norm_uid(parent_uid), name)
 
 
 @guarded("create_file")
@@ -330,10 +319,7 @@ def create_file(parent_uid: str, name: str) -> str:
     """Create a new (empty) file under a parent and return its UID.
 
     Write content with ``write_file``; that appends the first version."""
-    uid = _mf().touch(_norm_uid(parent_uid), name)
-    if uid is False:
-        raise ValueError(f"could not create file '{name}' under '{parent_uid}'")
-    return uid
+    return _mf().touch(_norm_uid(parent_uid), name)
 
 
 @guarded("write_file")
@@ -345,9 +331,7 @@ def write_file(uid: str, content: str, as_: str = "text") -> dict:
     payload = _content_from_text(content, as_)
     cap_write_bytes(payload, config.max_write_bytes)
     before = len(_mf().revisions(_norm_uid(uid)))
-    ok = _mf().put(_norm_uid(uid), payload)
-    if ok is False:
-        raise ValueError(f"could not write file '{uid}'")
+    _mf().put(_norm_uid(uid), payload)
     versions = [r.version for r in _mf().revisions(_norm_uid(uid))]
     return {"uid": uid, "versions_before": before, "versions_after": len(versions),
             "current_version": versions[0] if versions else None}
@@ -390,8 +374,6 @@ def restore_version(uid: str, version: str) -> dict:
     **append-only**: it adds a new version equal to the chosen one; nothing is
     overwritten or lost, so it is always itself reversible."""
     restored = _mf().restore_to_version(_norm_uid(uid), version)
-    if restored is False:
-        raise ValueError(f"could not restore '{uid}' to version '{version}'")
     return {"uid": uid, "restored_from": version, "new_version": restored}
 
 

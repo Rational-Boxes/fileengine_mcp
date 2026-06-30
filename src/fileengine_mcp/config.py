@@ -21,6 +21,11 @@ def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 
+def _bool(key: str, default: bool = False) -> bool:
+    v = os.environ.get(key)
+    return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
+
+
 class Config:
     def __init__(self) -> None:
         # gRPC core
@@ -57,6 +62,15 @@ class Config:
         self.ldap_tenant_base = _env("FILEENGINE_LDAP_TENANT_BASE", "ou=tenants,dc=rationalboxes,dc=com")
         self.ldap_bind_dn = _env("FILEENGINE_LDAP_BIND_DN", "cn=admin,dc=rationalboxes,dc=com")
         self.ldap_bind_password = _env("FILEENGINE_LDAP_BIND_PASSWORD", "admin")
+        # Read-only replica directory for disconnect fault tolerance
+        # (REPLICATION_FAILOVER.md). When the master directory is unreachable, auth
+        # fails over to this replica (auth is read-only). OFF unless configured; the
+        # replica defaults to ldap://localhost:1389 when *_REPLICA_ENABLED is set.
+        self.ldap_uri_replica = _env("FILEENGINE_LDAP_ENDPOINT_REPLICA", "")
+        if not self.ldap_uri_replica and _bool("FILEENGINE_LDAP_REPLICA_ENABLED", False):
+            self.ldap_uri_replica = "ldap://localhost:1389"
+        self.ldap_replica_enabled = bool(self.ldap_uri_replica)
+        self.failover_cooldown_s = int(_env("FILEENGINE_FAILOVER_COOLDOWN_S", "30"))
 
         # The LDAP identity the MCP server authenticates as (the agent's account)
         self.agent_user = _env("FILEENGINE_MCP_USER", _env("FILEENGINE_LDAP_USER", ""))
