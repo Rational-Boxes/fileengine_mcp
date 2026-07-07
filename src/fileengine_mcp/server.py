@@ -64,30 +64,62 @@ def _read_version_bytes(uid: str, version: str) -> bytes:
     return data
 
 
-# --- build the server (auth + gRPC connection happen once at startup) ---
+# --- build the server -------------------------------------------------------
+# Identity is transport-specific:
+#   * stdio — ONE process identity, authenticated once here at startup, used for
+#     every call (there is no per-request auth over stdio).
+#   * HTTP  — identity comes from EACH request (Authorization: Basic → LDAP bind,
+#     or Bearer token) and is bound per session; the process needs no identity.
+# So the bootstrap authentication below is BEST-EFFORT: if it fails or no agent is
+# configured, we start anyway with no process identity/client. stdio's main()
+# refuses to serve without one; the HTTP transport does not need one.
 load_dotenv()
 config = Config()
 identity = authenticate(config, config.agent_user, config.agent_password)
-if not identity.authenticated:
-    raise SystemExit(
-        f"LDAP authentication failed for MCP agent '{config.agent_user or '(unset)'}'. "
-        "Set FILEENGINE_MCP_USER / FILEENGINE_MCP_PASSWORD."
+if identity.authenticated:
+    mf = ManagedFiles(
+        user_name=identity.user,
+        user_roles=identity.roles,
+        server_address=config.grpc_address,
+        tenant=identity.tenant,
+    )
+else:
+    print(
+        f"MCP bootstrap agent '{config.agent_user or '(unset)'}' did not authenticate; "
+        "starting with per-request identity only. This is expected for the HTTP "
+        "transport (each request authenticates itself); stdio will refuse to serve.",
+        file=sys.stderr,
+    )
+    identity = None
+    mf = None
+
+# DNS-rebinding protection for the HTTP transport. Loopback is always trusted;
+# MCP_ALLOWED_HOSTS/_ORIGINS add the public host(s) when running behind a reverse
+# proxy or tunnel so external requests aren't rejected with 421 "Invalid Host
+# header". stdio ignores this entirely.
+_transport_security = None
+if config.allowed_hosts or config.allowed_origins:
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    _transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", *config.allowed_hosts],
+        allowed_origins=config.allowed_origins,
     )
 
-mf = ManagedFiles(
-    user_name=identity.user,
-    user_roles=identity.roles,
-    server_address=config.grpc_address,
-    tenant=identity.tenant,
-)
-
-server = FastMCP("fileengine")
+server = FastMCP("fileengine", transport_security=_transport_security)
 
 
 def _mf():
     """The active gRPC client: the per-request HTTP identity if one is bound to
     this request's session, otherwise the process identity (stdio)."""
-    return get_session_mf() or mf
+    active = get_session_mf() or mf
+    if active is None:
+        # HTTP requests always carry a session identity (the middleware 401s
+        # otherwise); this only guards a stdio server started with no bootstrap
+        # agent, which main() already refuses.
+        raise GuardError("no identity bound to this request")
+    return active
 
 
 audit.configure(config.audit_log_file)
@@ -405,9 +437,13 @@ if not config.read_only:
 
 
 def _banner(transport: str) -> None:
+    who = (
+        f"bootstrap-agent='{identity.user}' tenant='{identity.tenant}' roles={identity.roles}"
+        if identity is not None
+        else "identity=per-request (no bootstrap agent)"
+    )
     print(
-        f"FileEngine MCP server [{transport}]: bootstrap-agent='{identity.user}' "
-        f"tenant='{identity.tenant}' roles={identity.roles} core={config.grpc_address} "
+        f"FileEngine MCP server [{transport}]: {who} core={config.grpc_address} "
         f"read_only={config.read_only} allow_delete={config.allow_delete}",
         file=sys.stderr,
     )
@@ -415,6 +451,14 @@ def _banner(transport: str) -> None:
 
 def main() -> None:
     """Console entry point — runs the MCP server over stdio."""
+    # stdio has no per-request auth, so it needs the process identity that the
+    # bootstrap above tried to establish.
+    if identity is None:
+        raise SystemExit(
+            f"LDAP authentication failed for MCP agent '{config.agent_user or '(unset)'}'. "
+            "The stdio transport needs a process identity — set "
+            "FILEENGINE_MCP_USER / FILEENGINE_MCP_PASSWORD."
+        )
     _banner("stdio")
     server.run()
 
