@@ -43,6 +43,12 @@ class Config:
         self.http_host = _env("MCP_HTTP_HOST", "127.0.0.1")
         self.http_port = int(_env("MCP_HTTP_PORT", "8089"))
         self.token_ttl = int(_env("MCP_TOKEN_TTL", "3600"))
+        # Hosts/origins the Streamable HTTP transport will accept (DNS-rebinding
+        # protection). Loopback is always allowed; add the public host when running
+        # behind a reverse proxy or tunnel (e.g. MCP_ALLOWED_HOSTS=mcp.example.com),
+        # otherwise external requests are rejected with 421 "Invalid Host header".
+        self.allowed_hosts = [h.strip() for h in _env("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+        self.allowed_origins = [o.strip() for o in _env("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
         # Hardening / guardrails — layered on top of the LDAP/ACL decision, never
         # replacing it. Caps are per call; the allow-list sandboxes an agent to a
