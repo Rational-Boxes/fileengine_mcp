@@ -23,7 +23,8 @@ from . import audit
 from .config import Config, load_dotenv
 from .guards import (GuardError, cap_read_bytes, cap_results, cap_write_bytes,
                      within_allowlist)
-from .ldap_auth import authenticate
+from .ldap_auth import resolve_roles
+from .service_cred_client import get_verifier
 from .session import get_session, get_session_mf
 from ._client import ManagedFiles, NotFoundError
 
@@ -73,10 +74,18 @@ def _read_version_bytes(uid: str, version: str) -> bytes:
 # So the bootstrap authentication below is BEST-EFFORT: if it fails or no agent is
 # configured, we start anyway with no process identity/client. stdio's main()
 # refuses to serve without one; the HTTP transport does not need one.
+#
+# §16: the stdio agent authenticates with a key:secret service credential
+# (FILEENGINE_MCP_KEY/SECRET, scope "mcp") — verified once here against ldap_manager
+# — NOT an LDAP directory password. Roles come from LDAP for the resolved uid.
 load_dotenv()
 config = Config()
-identity = authenticate(config, config.agent_user, config.agent_password)
-if identity.authenticated:
+identity = None
+if config.mcp_key and config.mcp_secret:
+    _uid = get_verifier(config).verify(config.mcp_key, config.mcp_secret, config.tenant, "mcp")
+    if _uid:
+        identity = resolve_roles(config, _uid)
+if identity is not None and identity.authenticated:
     mf = ManagedFiles(
         user_name=identity.user,
         user_roles=identity.roles,
@@ -85,9 +94,9 @@ if identity.authenticated:
     )
 else:
     print(
-        f"MCP bootstrap agent '{config.agent_user or '(unset)'}' did not authenticate; "
-        "starting with per-request identity only. This is expected for the HTTP "
-        "transport (each request authenticates itself); stdio will refuse to serve.",
+        "MCP bootstrap key:secret did not authenticate; starting with per-request "
+        "identity only. This is expected for the HTTP transport (each request "
+        "authenticates itself); stdio will refuse to serve.",
         file=sys.stderr,
     )
     identity = None
@@ -455,9 +464,10 @@ def main() -> None:
     # bootstrap above tried to establish.
     if identity is None:
         raise SystemExit(
-            f"LDAP authentication failed for MCP agent '{config.agent_user or '(unset)'}'. "
-            "The stdio transport needs a process identity — set "
-            "FILEENGINE_MCP_USER / FILEENGINE_MCP_PASSWORD."
+            "MCP stdio authentication failed. The stdio transport needs a process "
+            "identity — set FILEENGINE_MCP_KEY / FILEENGINE_MCP_SECRET to a service "
+            "credential (scope 'mcp'), and LDAP_MANAGER_URL / "
+            "SERVICE_CRED_INTERNAL_SECRET so it can be verified."
         )
     _banner("stdio")
     server.run()

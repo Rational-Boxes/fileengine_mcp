@@ -71,6 +71,57 @@ def authenticate(cfg, username: str, password: str) -> Identity:
     return ident
 
 
+def resolve_roles(cfg, username: str) -> Identity:
+    """Resolve a user's roles WITHOUT a password bind (for key:secret auth, §16):
+    a service-bind search by uid + group-membership roles. ``authenticated`` is True
+    iff the uid exists. Mirrors :func:`authenticate`'s replica failover."""
+    ident = Identity(user=username, tenant=cfg.tenant)
+    if not username:
+        return ident
+    for uri, is_primary in _ldap_targets(cfg):
+        try:
+            result = _resolve_roles_against(uri, cfg, username)
+            if is_primary:
+                _breaker(cfg).reset()
+            return result
+        except _ServerUnreachable:
+            if is_primary:
+                _breaker(cfg).trip()
+            continue
+    return ident
+
+
+def _resolve_roles_against(uri: str, cfg, username: str) -> Identity:
+    """Service-bind role resolution against one directory (no user bind). Raises
+    :class:`_ServerUnreachable` if the directory can't be reached."""
+    ident = Identity(user=username, tenant=cfg.tenant)
+    server = Server(uri, get_info=ALL)
+    try:
+        svc = Connection(server, cfg.ldap_bind_dn, cfg.ldap_bind_password, auto_bind=True)
+    except LDAPException as e:
+        raise _ServerUnreachable(uri) from e
+    try:
+        svc.search(cfg.ldap_user_base, f"(uid={username})", search_scope=SUBTREE, attributes=["cn"])
+        if not svc.entries:
+            return ident
+        user_dn = svc.entries[0].entry_dn
+        roles: List[str] = []
+        svc.search(cfg.ldap_tenant_base,
+                   f"(&(objectClass=groupOfNames)(member={user_dn}))",
+                   search_scope=SUBTREE, attributes=["cn"])
+        for entry in svc.entries:
+            cn = str(entry.cn)
+            if cn and cn not in roles:
+                roles.append(cn)
+        if "administrators" in roles and "system_admin" not in roles:
+            roles.append("system_admin")
+        ident.roles = roles
+        ident.authenticated = True
+        return ident
+    finally:
+        svc.unbind()
+
+
 def _authenticate_against(uri: str, cfg, username: str, password: str) -> Identity:
     """Run the bind + role resolution against one directory. Raises
     :class:`_ServerUnreachable` if the directory can't be reached."""

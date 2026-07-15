@@ -81,3 +81,15 @@ class Config:
         # The LDAP identity the MCP server authenticates as (the agent's account)
         self.agent_user = _env("FILEENGINE_MCP_USER", _env("FILEENGINE_LDAP_USER", ""))
         self.agent_password = _env("FILEENGINE_MCP_PASSWORD", _env("FILEENGINE_LDAP_PASSWORD", ""))
+
+        # Service-credential (key:secret) auth (PROPOSAL §16) — the ONLY credential
+        # on both MCP transports (no legacy directory-password path). HTTP verifies a
+        # Basic key:secret at /auth/token; stdio verifies FILEENGINE_MCP_KEY/SECRET
+        # once at startup. Both call ldap_manager's internal verify endpoint; roles
+        # come from LDAP (ldap_auth.resolve_roles).
+        self.ldap_manager_url = _env("LDAP_MANAGER_URL", "")
+        self.service_cred_internal_secret = _env(
+            "SERVICE_CRED_INTERNAL_SECRET", _env("MFA_INTERNAL_SECRET", ""))
+        self.verify_cache_ttl = int(_env("SERVICE_CRED_VERIFY_CACHE_TTL", "60"))
+        self.mcp_key = _env("FILEENGINE_MCP_KEY", "")
+        self.mcp_secret = _env("FILEENGINE_MCP_SECRET", "")

@@ -11,13 +11,15 @@ The MCP endpoint (``/mcp``) and ``/whoami`` require authentication; ``/auth/toke
 authenticates itself. Identity is always LDAP-derived and forwarded to the core,
 which remains the ACL enforcement point."""
 import json
+from dataclasses import replace
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .http_auth import decode_basic, extract_tenant, resolve_identity
-from .ldap_auth import authenticate
+from .ldap_auth import resolve_roles
+from .service_cred_client import get_verifier
 from .session import Session, mf_for, reset_session, set_session, get_session
 from .token_store import TokenStore
 
@@ -63,7 +65,11 @@ class AuthMiddleware:
 
 
 async def _token_endpoint(request: Request) -> JSONResponse:
-    """Exchange credentials (Basic header or JSON body) for a bearer token."""
+    """Exchange a key:secret (Basic header or JSON body) for a bearer token (§16).
+
+    The credential is a backend-generated service credential (scope ``mcp``), not an
+    LDAP directory password; it is verified against ldap_manager and roles come from
+    LDAP."""
     auth = request.headers.get("authorization", "")
     creds = decode_basic(auth)
     if creds is None:
@@ -71,16 +77,23 @@ async def _token_endpoint(request: Request) -> JSONResponse:
             body = json.loads(await request.body() or b"{}")
         except json.JSONDecodeError:
             body = {}
-        creds = (body.get("username", ""), body.get("password", ""))
-    user, password = creds
-    if not user or not password:
+        # Accept key_id/secret; fall back to the legacy field names as aliases.
+        creds = (body.get("key_id", body.get("username", "")),
+                 body.get("secret", body.get("password", "")))
+    key_id, secret = creds
+    if not key_id or not secret:
         return JSONResponse({"error": "missing credentials"}, status_code=400)
 
     store: TokenStore = request.app.state.token_store
     config = request.app.state.config
-    identity = authenticate(config, user, password)
+    tenant = extract_tenant(dict(request.headers), request.headers.get("host", ""), config.tenant)
+    uid = get_verifier(config).verify(key_id, secret, tenant, "mcp")
+    if uid is None:
+        return JSONResponse({"error": "authentication failed"}, status_code=401)
+    identity = resolve_roles(config, uid)
     if not identity.authenticated:
         return JSONResponse({"error": "authentication failed"}, status_code=401)
+    identity = replace(identity, tenant=tenant)
     token = store.issue(identity)
     return JSONResponse({"access_token": token, "token_type": "bearer", "expires_in": store.ttl})
 
