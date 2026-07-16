@@ -24,13 +24,16 @@ _current: "contextvars.ContextVar[Optional[Session]]" = contextvars.ContextVar(
 )
 
 
-def mf_for(identity: Identity, config) -> ManagedFiles:
-    """Build a gRPC client scoped to a resolved identity + tenant."""
+def mf_for(identity: Identity, config, source_addr: str = "") -> ManagedFiles:
+    """Build a gRPC client scoped to a resolved identity + tenant. `source_addr` is
+    the calling agent's client IP (HTTP transport), forwarded to the core for audit;
+    empty for the stdio transport (local, no client connection)."""
     return ManagedFiles(
         user_name=identity.user,
         user_roles=identity.roles,
         server_address=config.grpc_address,
         tenant=identity.tenant,
+        source_addr=source_addr,
     )
 
 
