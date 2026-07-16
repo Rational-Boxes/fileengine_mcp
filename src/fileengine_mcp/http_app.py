@@ -56,11 +56,11 @@ class AuthMiddleware:
         if identity is None or not identity.authenticated:
             return await _UNAUTH(scope, receive, send)
 
-        # Caller IP forwarded to the core for audit — first X-Forwarded-For hop
-        # behind the proxy, else the socket peer.
-        xff = headers.get("x-forwarded-for", "")
+        # Caller IP forwarded to the core for audit — trusted-proxy aware (§3),
+        # honoring FILEENGINE_TRUSTED_PROXIES like the C++ bridges.
+        from .netutil import resolve_client_ip
         peer = scope.get("client")
-        source_addr = xff.split(",")[0].strip() if xff else (peer[0] if peer else "")
+        source_addr = resolve_client_ip(peer[0] if peer else "", headers.get("x-forwarded-for", ""))
 
         label = headers.get("mcp-session-id") or "http"
         token = set_session(Session(identity, mf_for(identity, self.config, source_addr), label=label))
