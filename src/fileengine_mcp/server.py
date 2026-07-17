@@ -230,8 +230,9 @@ def list_directory(uid: str = "root", show_deleted: bool = False) -> list[dict]:
 
     Use ``root`` (or the all-zeros UUID) for the filesystem root. Set
     ``show_deleted`` to include soft-deleted entries (useful before ``undelete``).
-    Returns each entry's uid, name, type (file|directory), size, and
-    version_count. Long listings are capped at ``MCP_MAX_RESULTS`` entries."""
+    Returns each entry's uid, name, type (file|directory), size,
+    version_count, and created_at/modified_at (ctime/mtime, ISO 8601 UTC).
+    Long listings are capped at ``MCP_MAX_RESULTS`` entries."""
     entries = _mf().dir(_norm_uid(uid), show_deleted=show_deleted)
     rows = [
         {
@@ -240,6 +241,10 @@ def list_directory(uid: str = "root", show_deleted: bool = False) -> list[dict]:
             "type": "directory" if e.is_container else "file",
             "size": e.size,
             "version_count": e.version_count,
+            # ctime/mtime derived by the core from the version-name timestamps
+            # (ISO 8601 UTC); None only if the core omitted them.
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+            "modified_at": e.modified_at.isoformat() if e.modified_at else None,
         }
         for e in entries
     ]
@@ -266,8 +271,9 @@ def read_file(uid: str) -> str:
 @server.tool(annotations=_READ_HINT)
 @guarded("stat")
 def stat(uid: str) -> dict:
-    """Get metadata for a file or directory: type, size, owner, parent, and the
-    current version timestamp."""
+    """Get metadata for a file or directory: type, size, owner, parent, the
+    current version timestamp, and created_at/modified_at (ctime/mtime, ISO 8601
+    UTC, derived from the version history)."""
     info = _mf().stat(_norm_uid(uid))
     return {
         "uid": info.uid,
@@ -277,6 +283,10 @@ def stat(uid: str) -> dict:
         "size": info.size,
         "owner": info.owner,
         "version": info.version,
+        # ctime/mtime derived by the core from the version-name timestamps
+        # (ISO 8601 UTC), consistent with list_directory and the other surfaces.
+        "created_at": info.created_at.isoformat() if info.created_at else None,
+        "modified_at": info.modified_at.isoformat() if info.modified_at else None,
     }
 
 
