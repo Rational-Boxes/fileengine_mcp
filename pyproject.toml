@@ -6,7 +6,8 @@ license = {text = "AGPL-3.0-or-later"}
 authors = [{name = "James Hickman", email = "james@rationalboxes.com"}]
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.0",
+    # Cap below 2.0: mcp 2.0.0 removed the `mcp.server.fastmcp` module we import.
+    "mcp>=1.2,<2",
     "ldap3>=2.9",
     "grpcio>=1.50",
     "protobuf>=4.21",
