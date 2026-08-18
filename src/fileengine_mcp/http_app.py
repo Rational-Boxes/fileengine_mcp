@@ -26,12 +26,14 @@ The MCP endpoint (``/mcp``) and ``/whoami`` require authentication; ``/auth/toke
 authenticates itself. Identity is always LDAP-derived and forwarded to the core,
 which remains the ACL enforcement point."""
 import json
+import os
 from dataclasses import replace
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
+from . import metrics as _metrics
 from .http_auth import decode_basic, extract_tenant, resolve_identity
 from .ldap_auth import resolve_roles
 from .service_cred_client import get_verifier
@@ -46,13 +48,32 @@ _UNAUTH = JSONResponse(
 )
 
 
+# The unauthenticated monitoring surface, shared with every other service here.
+# Prometheus cannot present a bearer token, so these must bypass AuthMiddleware —
+# which is exactly why they are also IP-guarded below.
+MONITORING_PATHS = {"/healthz", "/readyz", "/metrics"}
+
+_FORBIDDEN = JSONResponse({"error": "forbidden"}, status_code=403)
+
+
+def monitoring_allowlist() -> set[str]:
+    """Client IPs permitted to reach the monitoring routes (empty = unrestricted).
+
+    Same ``FILEENGINE_MONITORING_ALLOW_IPS`` knob the other services read. Read at
+    call time rather than import time so a test (and an operator restarting under
+    a new environment) sees the change.
+    """
+    raw = os.environ.get("FILEENGINE_MONITORING_ALLOW_IPS", "")
+    return {ip.strip() for ip in raw.split(",") if ip.strip()}
+
+
 class AuthMiddleware:
     """Pure-ASGI middleware: authenticate, set the session contextvar, delegate.
 
     Implemented at the ASGI layer (not Starlette ``BaseHTTPMiddleware``) so the
     contextvar set here reliably propagates to the downstream app/tools."""
 
-    _OPEN_PATHS = {"/auth/token"}
+    _OPEN_PATHS = {"/auth/token"} | MONITORING_PATHS
 
     def __init__(self, app, config, store: TokenStore):
         self.app = app
@@ -60,7 +81,21 @@ class AuthMiddleware:
         self.store = store
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("path", "").rstrip("/") in {
+        path = scope.get("path", "").rstrip("/")
+
+        # Monitoring: no authentication, but not open to anyone either. Unlike the
+        # C++ services this transport has a single listener that compose binds to
+        # 0.0.0.0 and nginx publishes at /mcp/, so "it only listens on loopback"
+        # is not true here and the allowlist is the control that replaces it.
+        if scope["type"] == "http" and path in {p.rstrip("/") for p in MONITORING_PATHS}:
+            allow = monitoring_allowlist()
+            if allow:
+                peer = scope.get("client")
+                if (peer[0] if peer else "") not in allow:
+                    return await _FORBIDDEN(scope, receive, send)
+            return await self.app(scope, receive, send)
+
+        if scope["type"] != "http" or path in {
             p.rstrip("/") for p in self._OPEN_PATHS
         }:
             return await self.app(scope, receive, send)
@@ -131,6 +166,102 @@ async def _whoami(request: Request) -> JSONResponse:
     })
 
 
+# ---------------------------- monitoring -----------------------------------
+
+def _check_core(config) -> bool:
+    """gRPC core reachable. A channel-ready probe rather than an RPC, so readiness
+    does not depend on any principal's ACLs."""
+    try:
+        import grpc
+        channel = grpc.insecure_channel(config.grpc_address)
+        try:
+            grpc.channel_ready_future(channel).result(timeout=2)
+            return True
+        finally:
+            channel.close()
+    except Exception:  # noqa: BLE001 - any failure means "not reachable"
+        return False
+
+
+def _check_ldap(config) -> bool:
+    """LDAP reachable. Authentication is the whole point of this server — every
+    request resolves an identity against the directory — so an unreachable
+    directory means genuinely not ready, not merely degraded.
+
+    A bare connect, not a bind: readiness must not depend on the agent account
+    being configured, since the HTTP transport authenticates each caller.
+    """
+    try:
+        from urllib.parse import urlparse
+        import socket
+        parsed = urlparse(config.ldap_uri)
+        port = parsed.port or (636 if parsed.scheme == "ldaps" else 389)
+        with socket.create_connection((parsed.hostname or "localhost", port), timeout=2):
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _healthz(request: Request) -> JSONResponse:
+    """Liveness: the process is up and serving. No external calls."""
+    from . import __version__ as _v
+    return JSONResponse({"status": "ok", "service": "mcp", "version": _v})
+
+
+async def _readyz(request: Request) -> JSONResponse:
+    """Readiness: the dependencies this server cannot serve a request without."""
+    from starlette.concurrency import run_in_threadpool
+    config = request.app.state.config
+    checks = {
+        "core": await run_in_threadpool(_check_core, config),
+        "ldap": await run_in_threadpool(_check_ldap, config),
+    }
+    ok = all(checks.values())
+    return JSONResponse({"status": "ok" if ok else "degraded", "checks": checks},
+                        status_code=200 if ok else 503)
+
+
+async def _metrics_endpoint(request: Request) -> PlainTextResponse:
+    """Prometheus exposition. Same format and namespace as every other service."""
+    from . import __version__ as _v
+    app = request.app
+
+    def _service_metrics(m: "_metrics.Metrics") -> None:
+        store: TokenStore | None = getattr(app.state, "token_store", None)
+        if store is not None:
+            st = store.stats()
+            m.gauge("fileengine_mcp_tokens_active",
+                    "Bearer tokens issued to agents that have not yet expired",
+                    st["active"])
+            # Expired-but-retained entries are only dropped when that exact token
+            # is presented again, so this climbing is the signal that agents are
+            # taking tokens and never reusing them.
+            m.gauge("fileengine_mcp_tokens_expired_retained",
+                    "Expired tokens still held in memory; grows if issued tokens are never reused",
+                    st["expired"])
+
+        config = getattr(app.state, "config", None)
+        if config is not None:
+            m.gauge("fileengine_mcp_read_only",
+                    "1 when the server refuses every mutating tool",
+                    1 if getattr(config, "read_only", False) else 0)
+            m.gauge("fileengine_mcp_allow_delete",
+                    "1 when the (reversible) delete/undelete tools are enabled",
+                    1 if getattr(config, "allow_delete", False) else 0)
+
+        sessions = getattr(app.state, "mcp_session_manager", None)
+        if sessions is not None and hasattr(sessions, "__len__"):
+            try:
+                m.gauge("fileengine_mcp_sessions",
+                        "Live Streamable-HTTP MCP sessions", len(sessions))
+            except Exception:  # noqa: BLE001 - session bookkeeping is best-effort
+                pass
+
+    return PlainTextResponse(
+        _metrics.render("mcp", [_service_metrics], {"version": _v}),
+        media_type=_metrics.CONTENT_TYPE)
+
+
 def build_app(server, config, ttl_seconds: int = 3600):
     """Build the Streamable-HTTP ASGI app for an MCP ``server`` + ``config``."""
     app = server.streamable_http_app()
@@ -139,5 +270,10 @@ def build_app(server, config, ttl_seconds: int = 3600):
     app.state.config = config
     app.router.routes.append(Route("/auth/token", _token_endpoint, methods=["POST"]))
     app.router.routes.append(Route("/whoami", _whoami, methods=["GET"]))
+    # Monitoring. Unauthenticated (a scraper has no credential) and IP-guarded in
+    # AuthMiddleware; see MONITORING_PATHS.
+    app.router.routes.append(Route("/healthz", _healthz, methods=["GET"]))
+    app.router.routes.append(Route("/readyz", _readyz, methods=["GET"]))
+    app.router.routes.append(Route("/metrics", _metrics_endpoint, methods=["GET"]))
     app.add_middleware(AuthMiddleware, config=config, store=store)
     return app

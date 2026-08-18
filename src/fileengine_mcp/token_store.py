@@ -52,3 +52,21 @@ class TokenStore:
     def revoke(self, token: str) -> None:
         with self._lock:
             self._tokens.pop(token, None)
+
+    def stats(self) -> dict[str, int]:
+        """Token counts for monitoring. Read-only — deliberately does not prune.
+
+        Expired entries are only dropped when someone presents that exact token
+        again (see ``resolve``), so a token issued and never reused stays in the
+        dict for the life of the process. Reporting ``expired`` separately makes
+        that visible as a number that climbs; pruning here would hide it behind a
+        healthy-looking ``active``.
+        """
+        now = time.time()
+        with self._lock:
+            expiries = [expiry for _identity, expiry in self._tokens.values()]
+        return {
+            "active": sum(1 for e in expiries if e >= now),
+            "expired": sum(1 for e in expiries if e < now),
+            "total": len(expiries),
+        }
