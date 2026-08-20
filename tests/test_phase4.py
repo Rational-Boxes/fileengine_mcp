@@ -63,6 +63,41 @@ def test_byte_and_result_caps():
     assert cap_results([1, 2, 3], 0) == ([1, 2, 3], False)
 
 
+def test_read_capped_stops_before_materialising_an_oversized_file():
+    """The cap must protect the SERVICE, not just the model's context window.
+
+    The old shape read the whole file and then measured it, so an agent pointed
+    at a 5 GiB file exhausted memory here long before anything checked a limit.
+    This asserts the generator is abandoned rather than drained.
+    """
+    from fileengine_mcp.guards import GuardError, read_capped
+
+    pulled = []
+
+    def endless():
+        # Stands in for a file far larger than the cap. If read_capped drains
+        # it, this test hangs rather than fails — which is the honest signal.
+        for i in range(1_000_000):
+            pulled.append(i)
+            yield b"x" * 1024
+
+    with pytest.raises(GuardError):
+        read_capped(endless(), 4096)
+    # 4096-byte cap over 1 KiB chunks: it must stop within a chunk or two of
+    # the limit, not read the whole generator.
+    assert len(pulled) <= 8, f"pulled {len(pulled)} chunks past a 4 KiB cap"
+
+
+def test_read_capped_returns_content_under_the_cap():
+    from fileengine_mcp.guards import read_capped
+    assert read_capped([b"ab", b"cd"], 100) == b"abcd"
+
+
+def test_a_zero_cap_disables_the_limit():
+    from fileengine_mcp.guards import read_capped
+    assert read_capped([b"x" * 5000], 0) == b"x" * 5000
+
+
 def test_within_allowlist():
     from fileengine_mcp.guards import within_allowlist
     tree = {"c": "b", "b": "a", "a": ""}

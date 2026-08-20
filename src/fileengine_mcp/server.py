@@ -37,7 +37,7 @@ from mcp.types import ToolAnnotations
 from . import audit
 from .config import Config, load_dotenv
 from .guards import (GuardError, cap_read_bytes, cap_results, cap_write_bytes,
-                     within_allowlist)
+                     read_capped, within_allowlist)
 from .ldap_auth import resolve_roles
 from .service_cred_client import get_verifier
 from .session import get_session, get_session_mf
@@ -74,10 +74,10 @@ def _read_version_bytes(uid: str, version: str) -> bytes:
     versions = [r.version for r in revs]
     if version not in versions:
         raise ValueError(f"version '{version}' not found for '{uid}'")
-    buf = _mf().get(_norm_uid(uid), back=versions.index(version))
-    data = buf.getvalue()
-    cap_read_bytes(data, config.max_read_bytes)
-    return data
+    # Streamed and capped as it arrives — see read_capped. `back=` selects the
+    # revision; get_stream takes the version name directly.
+    return read_capped(_mf().get_stream(_norm_uid(uid), version=version),
+                       config.max_read_bytes)
 
 
 # --- build the server -------------------------------------------------------
@@ -277,9 +277,7 @@ def read_file(uid: str) -> str:
 
     Binary content that is not valid UTF-8 is returned base64-encoded with a
     ``[base64]`` prefix. Content over ``MCP_MAX_READ_BYTES`` is rejected."""
-    buf = _mf().get(_norm_uid(uid))
-    data = buf.getvalue()
-    cap_read_bytes(data, config.max_read_bytes)
+    data = read_capped(_mf().get_stream(_norm_uid(uid)), config.max_read_bytes)
     return _content_to_text(data)
 
 
