@@ -37,6 +37,30 @@ def cap_read_bytes(data: bytes, limit: int) -> None:
             "read a specific version or narrow the request")
 
 
+def read_capped(chunks, limit: int) -> bytes:
+    """Materialise a chunk stream, refusing as soon as it exceeds ``limit``.
+
+    A tool result is a string handed to a model, so the content genuinely has to
+    end up in memory — this is one of the few places in the platform where
+    streaming the OUTPUT is not possible. What is possible, and what this does,
+    is streaming the INPUT and stopping early.
+
+    That distinction is the whole point. Buffering the file and then measuring it
+    makes the cap protect the model's context window while leaving the SERVICE
+    unprotected: an agent pointed at a 5 GiB file would exhaust memory here long
+    before anything checked a limit. Now peak memory is bounded by the cap
+    regardless of how large the file is.
+    """
+    out = bytearray()
+    for chunk in chunks:
+        out.extend(chunk)
+        if limit and len(out) > limit:
+            raise GuardError(
+                f"content exceeds MCP_MAX_READ_BYTES={limit}; "
+                "read a specific version or narrow the request")
+    return bytes(out)
+
+
 def cap_results(items: list, limit: int) -> tuple[list, bool]:
     """Truncate a listing to ``limit`` entries; returns (items, truncated)."""
     if limit and len(items) > limit:

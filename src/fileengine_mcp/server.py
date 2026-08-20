@@ -37,7 +37,7 @@ from mcp.types import ToolAnnotations
 from . import audit
 from .config import Config, load_dotenv
 from .guards import (GuardError, cap_read_bytes, cap_results, cap_write_bytes,
-                     within_allowlist)
+                     read_capped, within_allowlist)
 from .ldap_auth import resolve_roles
 from .service_cred_client import get_verifier
 from .session import get_session, get_session_mf
@@ -74,10 +74,10 @@ def _read_version_bytes(uid: str, version: str) -> bytes:
     versions = [r.version for r in revs]
     if version not in versions:
         raise ValueError(f"version '{version}' not found for '{uid}'")
-    buf = _mf().get(_norm_uid(uid), back=versions.index(version))
-    data = buf.getvalue()
-    cap_read_bytes(data, config.max_read_bytes)
-    return data
+    # Streamed and capped as it arrives — see read_capped. `back=` selects the
+    # revision; get_stream takes the version name directly.
+    return read_capped(_mf().get_stream(_norm_uid(uid), version=version),
+                       config.max_read_bytes)
 
 
 # --- build the server -------------------------------------------------------
@@ -277,9 +277,7 @@ def read_file(uid: str) -> str:
 
     Binary content that is not valid UTF-8 is returned base64-encoded with a
     ``[base64]`` prefix. Content over ``MCP_MAX_READ_BYTES`` is rejected."""
-    buf = _mf().get(_norm_uid(uid))
-    data = buf.getvalue()
-    cap_read_bytes(data, config.max_read_bytes)
+    data = read_capped(_mf().get_stream(_norm_uid(uid)), config.max_read_bytes)
     return _content_to_text(data)
 
 
@@ -344,10 +342,23 @@ def get_metadata(uid: str, key: str | None = None) -> dict:
 @server.tool(annotations=_READ_HINT)
 @guarded("check_permission")
 def check_permission(uid: str, permission: str, principal: str | None = None) -> bool:
-    """Check whether a principal has a permission on a resource. ``permission``
-    is a letter (r/w/x/d/...) or name (READ/WRITE/...); ``principal`` defaults to
-    the calling agent."""
-    return bool(_mf().check_permission(_norm_uid(uid), permission, user=principal))
+    """Check whether a principal can reach a resource with a permission.
+    ``permission`` is a letter (r/w/x/d/...) or name (READ/WRITE/...);
+    ``principal`` defaults to the calling agent. A resource that does not exist,
+    or has been deleted, answers ``False``."""
+    resolved = _norm_uid(uid)
+    mf = _mf()
+    if not mf.check_permission(resolved, permission, user=principal):
+        return False
+    # The core's CheckPermission evaluates ACL rules only, and `AclManager`
+    # ships `default_read_ = true`: no matching rule means READ. A uid that does
+    # not exist has no matching rule either, so the bare call answers True for a
+    # resource that is not there. Verified against a live core, 2026-08-20.
+    #
+    # It matters more on this door than most: the answer is handed to an agent
+    # as a tool result, so a bare check would have an LLM confidently reporting
+    # that a file it invented is readable -- and acting on it.
+    return bool(mf.entity_exists(resolved))
 
 
 # --- resources: browsable files + their immutable version history ---
