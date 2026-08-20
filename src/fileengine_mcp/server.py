@@ -344,10 +344,23 @@ def get_metadata(uid: str, key: str | None = None) -> dict:
 @server.tool(annotations=_READ_HINT)
 @guarded("check_permission")
 def check_permission(uid: str, permission: str, principal: str | None = None) -> bool:
-    """Check whether a principal has a permission on a resource. ``permission``
-    is a letter (r/w/x/d/...) or name (READ/WRITE/...); ``principal`` defaults to
-    the calling agent."""
-    return bool(_mf().check_permission(_norm_uid(uid), permission, user=principal))
+    """Check whether a principal can reach a resource with a permission.
+    ``permission`` is a letter (r/w/x/d/...) or name (READ/WRITE/...);
+    ``principal`` defaults to the calling agent. A resource that does not exist,
+    or has been deleted, answers ``False``."""
+    resolved = _norm_uid(uid)
+    mf = _mf()
+    if not mf.check_permission(resolved, permission, user=principal):
+        return False
+    # The core's CheckPermission evaluates ACL rules only, and `AclManager`
+    # ships `default_read_ = true`: no matching rule means READ. A uid that does
+    # not exist has no matching rule either, so the bare call answers True for a
+    # resource that is not there. Verified against a live core, 2026-08-20.
+    #
+    # It matters more on this door than most: the answer is handed to an agent
+    # as a tool result, so a bare check would have an LLM confidently reporting
+    # that a file it invented is readable -- and acting on it.
+    return bool(mf.entity_exists(resolved))
 
 
 # --- resources: browsable files + their immutable version history ---
