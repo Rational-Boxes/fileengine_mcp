@@ -113,7 +113,26 @@ class AuthMiddleware:
         source_addr = resolve_client_ip(peer[0] if peer else "", headers.get("x-forwarded-for", ""))
 
         label = headers.get("mcp-session-id") or "http"
-        token = set_session(Session(identity, mf_for(identity, self.config, source_addr), label=label))
+        # The origin this request came in on, carried through for `file_link`.
+        #
+        # Taken from the request rather than configured, for the reason csai's
+        # app_links.py sets out at length: tenants reach the platform through
+        # their own doors — a subdomain, a vanity domain — and nginx proxies
+        # /mcp/ on each tenant vhost forwarding Host and X-Forwarded-Proto, so
+        # the origin the request arrived on IS that tenant's app origin. One
+        # deployment, every tenant correct, nothing to configure.
+        #
+        # A client-supplied Host is normally not something to build URLs from.
+        # Here it is already settled: the transport refuses any Host outside
+        # MCP_ALLOWED_HOSTS before a tool ever runs (and with that unset, refuses
+        # everything but loopback), so by this point the value is one the
+        # operator named.
+        proto = (headers.get("x-forwarded-proto", "").split(",")[0].strip()
+                 or ("https" if scope.get("scheme") == "https" else "http"))
+        host = headers.get("host", "").strip()
+        origin = f"{proto}://{host}" if host else ""
+        token = set_session(Session(identity, mf_for(identity, self.config, source_addr),
+                                    label=label, origin=origin))
         try:
             await self.app(scope, receive, send)
         finally:
