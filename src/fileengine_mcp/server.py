@@ -40,7 +40,8 @@ from .guards import (GuardError, cap_read_bytes, cap_results, cap_write_bytes,
                      read_capped, within_allowlist)
 from .ldap_auth import resolve_roles
 from .service_cred_client import get_verifier
-from .csai_client import TextForbidden, TextUnavailable, text_client
+from .csai_client import (BadRequest, TextForbidden, TextUnavailable,
+                          text_client)
 from .session import get_session, get_session_mf
 from ._client import ManagedFiles, NotFoundError
 
@@ -280,6 +281,49 @@ def read_file(uid: str) -> str:
     ``[base64]`` prefix. Content over ``MCP_MAX_READ_BYTES`` is rejected."""
     data = read_capped(_mf().get_stream(_norm_uid(uid)), config.max_read_bytes)
     return _content_to_text(data)
+
+
+@server.tool(annotations=_READ_HINT)
+@guarded("search")
+def search(query: str, limit: int = 20, fuzzy: bool = True) -> list[dict]:
+    """Search the corpus and get back the files that match, best first.
+
+    Full-text over the Markdown extracted from every indexed document, so it
+    reaches INSIDE .docx, .pptx, .xlsx and PDF content, not just filenames. Each
+    hit carries ``file_uid``, ``name``, ``snippet`` and ``score``; pass a
+    ``file_uid`` to ``read_text`` to read the whole document.
+
+    This is the tool to reach for FIRST when the question is "what does this
+    corpus say about X" — walking directories and reading candidates does by hand
+    what the index already did. ``fuzzy`` also matches near-spellings; set it
+    False to require the terms as written. Results are permission-filtered: a
+    file you may not read is not in them, and its existence is not disclosed."""
+    who = _active_identity()
+    if who is None:
+        raise GuardError("no identity bound to this request")
+    try:
+        hits = text_client(config).search(
+            query, user=who.user, roles=who.roles, tenant=who.tenant,
+            # Capped by MCP's own MCP_MAX_RESULTS as well as the service's, so
+            # one knob bounds every listing an agent can pull from this door.
+            limit=min(int(limit), config.max_results),
+            fuzzy=bool(fuzzy),
+        )
+    except TextForbidden:
+        raise GuardError("not permitted to search this tenant")
+    except BadRequest as e:
+        # The query itself was refused (empty, or past the service's cap). That is
+        # the caller's to fix, so say what happened rather than returning [] —
+        # an empty list reads as "nothing matches", which is a different answer.
+        raise GuardError(str(e))
+    # Subtree confinement applies to results as much as to targets: an allow-list
+    # that stops `read_file` reaching outside it must not be bypassed by a search
+    # that hands back names and snippets from the same place.
+    if config.subtree_allowlist:
+        hits = [h for h in hits
+                if within_allowlist(_norm_uid(h.get("file_uid", "")), config.subtree_allowlist,
+                                    parent_of=_parent_of, root_uid="")]
+    return hits
 
 
 @server.tool(annotations=_READ_HINT)

@@ -13,12 +13,18 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Fetch a document's extracted Markdown from convert_search_ai.
+"""Ask convert_search_ai what MCP cannot answer from the store alone.
+
+Two things live in CSAI's database rather than in FileEngine: a document's
+extracted Markdown, and the index that makes the corpus searchable. Neither is
+reachable over the gRPC path the other tools use.
 
 ``read_file`` returns what is IN the store: a .docx comes back as base64, because
 that is what a .docx is. The readable text of one is produced during ingestion and
 kept in CSAI's database — so an agent that wants to read a document, rather than
-download it, has to ask CSAI.
+download it, has to ask CSAI. Search is the same story one level up: an agent
+that has to walk the tree and read likely files to answer a question is doing by
+hand what the index already did at ingestion.
 
 MCP cannot call CSAI's user-facing route: that accepts CSAI's own tokens, an
 http_bridge token, or an LDAP password, and MCP holds none of the three for the
@@ -44,6 +50,10 @@ class ExtractionNotConfigured(Exception):
     """This deployment has not wired MCP to CSAI."""
 
 
+class BadRequest(Exception):
+    """CSAI rejected the request itself — an empty or over-long query."""
+
+
 class CsaiTextClient:
     def __init__(self, base_url: str, internal_secret: str, timeout: float = 30.0) -> None:
         self.base_url = (base_url or "").rstrip("/")
@@ -54,36 +64,54 @@ class CsaiTextClient:
     def enabled(self) -> bool:
         return bool(self.base_url) and bool(self.secret)
 
-    def get_text(self, file_uid: str, *, user: str, roles, tenant: str) -> Tuple[str, bool]:
-        """``(markdown, truncated)`` for ``file_uid`` as ``user``."""
+    def _post(self, path: str, payload: dict) -> dict:
+        """POST to the internal API with the caller asserted. Shared by both calls
+        so the assertion, the header and the error mapping cannot drift apart."""
         if not self.enabled:
             raise ExtractionNotConfigured(
-                "text extraction is not wired on this deployment "
+                "convert_search_ai is not wired on this deployment "
                 "(CSAI_URL / CSAI_INTERNAL_SECRET)")
-        url = f"{self.base_url}/internal/documents/{file_uid}/text"
-        payload = json.dumps({"user": user, "roles": list(roles or []),
-                              "tenant": tenant}).encode()
-        req = urllib.request.Request(url, data=payload, method="POST")
+        req = urllib.request.Request(f"{self.base_url}{path}",
+                                     data=json.dumps(payload).encode(), method="POST")
         req.add_header("Content-Type", "application/json")
         req.add_header("X-Internal-Auth", self.secret)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = json.loads(resp.read().decode() or "{}")
+                return json.loads(resp.read().decode() or "{}")
         except urllib.error.HTTPError as e:
+            detail = _detail(e)
+            if e.code == 403:
+                raise TextForbidden(detail or path) from None
+            if e.code == 400:
+                raise BadRequest(detail or "rejected by convert_search_ai") from None
             # 404 is two different answers on one status: the route is off for the
             # whole deployment, or this one file has no extracted text. Told apart
             # by the detail, because they need different things from the operator.
-            if e.code == 403:
-                raise TextForbidden(file_uid) from None
             if e.code == 404:
-                detail = _detail(e)
                 if "not enabled" in detail:
                     raise ExtractionNotConfigured(
                         "convert_search_ai has no internal secret configured") from None
-                raise TextUnavailable(file_uid) from None
-            raise RuntimeError(f"convert_search_ai returned {e.code}: {_detail(e)}") from None
+                raise TextUnavailable(detail or path) from None
+            raise RuntimeError(f"convert_search_ai returned {e.code}: {detail}") from None
         except urllib.error.URLError as e:
             raise RuntimeError(f"convert_search_ai unreachable: {e.reason}") from None
+
+    def search(self, query: str, *, user: str, roles, tenant: str,
+               limit: int = 20, fuzzy: bool = True) -> list:
+        """Permission-filtered hits for ``query`` as ``user``.
+
+        The filtering happens in CSAI, against the core, for this principal — a
+        hit list is a disclosure in itself, so it is not something to assemble
+        here and trim afterwards."""
+        body = self._post("/internal/search", {
+            "user": user, "roles": list(roles or []), "tenant": tenant,
+            "query": query, "limit": int(limit), "fuzzy": bool(fuzzy)})
+        return list(body.get("hits") or [])
+
+    def get_text(self, file_uid: str, *, user: str, roles, tenant: str) -> Tuple[str, bool]:
+        """``(markdown, truncated)`` for ``file_uid`` as ``user``."""
+        body = self._post(f"/internal/documents/{file_uid}/text",
+                          {"user": user, "roles": list(roles or []), "tenant": tenant})
         return body.get("text", ""), bool(body.get("truncated"))
 
 
