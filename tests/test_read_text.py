@@ -180,3 +180,88 @@ def test_a_denial_from_csai_is_a_guard_error(monkeypatch):
 
     with pytest.raises(GuardError):
         server.read_text("f1")
+
+
+# --- search -----------------------------------------------------------------
+#
+# The index lives in CSAI, so an agent without this walks the tree and reads
+# candidates to answer a question the index already answered at ingestion.
+
+def test_search_asserts_the_caller_and_passes_the_query(monkeypatch):
+    rec = _Recorder(payload={"hits": [{"file_uid": "f1", "name": "a.docx",
+                                       "snippet": "…", "score": 0.5}]})
+    monkeypatch.setattr("urllib.request.urlopen", rec)
+
+    hits = _client().search("leed v5", user="jo@example.com", roles=["administrators"],
+                            tenant="acme", limit=5, fuzzy=False)
+
+    assert hits == [{"file_uid": "f1", "name": "a.docx", "snippet": "…", "score": 0.5}]
+    assert rec.seen.full_url.endswith("/internal/search")
+    assert rec.seen.get_header("X-internal-auth") == "s3cret"
+    assert json.loads(rec.seen.data) == {
+        "user": "jo@example.com", "roles": ["administrators"], "tenant": "acme",
+        "query": "leed v5", "limit": 5, "fuzzy": False}
+
+
+def test_a_rejected_query_is_its_own_failure(monkeypatch):
+    """400 is the query's fault, not the file's and not the deployment's — an
+    empty result list would read as 'nothing matches', a different answer."""
+    from fileengine_mcp.csai_client import BadRequest
+    monkeypatch.setattr("urllib.request.urlopen",
+                        _Recorder(error=_http_error(400, "query is empty")))
+    with pytest.raises(BadRequest):
+        _client().search("", user="jo", roles=[], tenant="acme")
+
+
+def test_search_on_an_unwired_deployment_says_so():
+    from fileengine_mcp.csai_client import ExtractionNotConfigured
+    with pytest.raises(ExtractionNotConfigured):
+        CsaiTextClient("", "").search("q", user="jo", roles=[], tenant="acme")
+
+
+def test_the_search_tool_is_registered_and_read_only():
+    import asyncio
+    tools = {t.name: t for t in asyncio.run(_server().server.list_tools())}
+    assert "search" in tools
+    assert tools["search"].annotations.readOnlyHint is True
+
+
+def test_the_search_tool_caps_the_limit_at_max_results(monkeypatch):
+    server = _server()
+    from fileengine_mcp.ldap_auth import Identity
+    seen = {}
+
+    class _Fake:
+        def search(self, query, *, user, roles, tenant, limit, fuzzy):
+            seen.update(query=query, user=user, limit=limit, fuzzy=fuzzy)
+            return [{"file_uid": "f1", "name": "a.docx", "snippet": "…", "score": 0.5}]
+
+    monkeypatch.setattr(server, "text_client", lambda _cfg: _Fake())
+    monkeypatch.setattr(server, "_active_identity",
+                        lambda: Identity(user="jo", roles=[], tenant="acme", authenticated=True))
+    monkeypatch.setattr(server.config, "max_results", 25, raising=False)
+
+    hits = server.search("leed", limit=10_000)
+    assert hits and seen["limit"] == 25          # MCP's own cap, not the caller's number
+    assert seen["query"] == "leed" and seen["user"] == "jo"
+
+
+def test_search_results_are_confined_to_the_subtree_allowlist(monkeypatch):
+    """An allow-list that stops read_file reaching outside it must not be walked
+    around by a search that returns names and snippets from the same place."""
+    server = _server()
+    from fileengine_mcp.ldap_auth import Identity
+
+    class _Fake:
+        def search(self, query, *, user, roles, tenant, limit, fuzzy):
+            return [{"file_uid": "inside", "name": "a.docx", "snippet": "…", "score": 0.9},
+                    {"file_uid": "outside", "name": "b.docx", "snippet": "…", "score": 0.8}]
+
+    monkeypatch.setattr(server, "text_client", lambda _cfg: _Fake())
+    monkeypatch.setattr(server, "_active_identity",
+                        lambda: Identity(user="jo", roles=[], tenant="acme", authenticated=True))
+    monkeypatch.setattr(server.config, "subtree_allowlist", ["inside"], raising=False)
+    monkeypatch.setattr(server, "within_allowlist",
+                        lambda uid, allow, **kw: uid in allow)
+
+    assert [h["file_uid"] for h in server.search("leed")] == ["inside"]
