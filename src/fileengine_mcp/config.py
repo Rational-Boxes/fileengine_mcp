@@ -108,3 +108,15 @@ class Config:
         self.verify_cache_ttl = int(_env("SERVICE_CRED_VERIFY_CACHE_TTL", "60"))
         self.mcp_key = _env("FILEENGINE_MCP_KEY", "")
         self.mcp_secret = _env("FILEENGINE_MCP_SECRET", "")
+
+        # convert_search_ai, for `read_text`. The extracted Markdown of a document
+        # lives in CSAI's database, not in the store, so it cannot be fetched over
+        # the gRPC path every other tool uses. Reached in-cluster by container
+        # name over its internal API, which authenticates with this shared secret
+        # and takes the caller's identity as an assertion — CSAI still runs the
+        # READ check against the core for that principal. Either value empty and
+        # the tool reports that extraction is not wired rather than failing oddly.
+        self.csai_url = _env("CSAI_URL", "")
+        self.csai_internal_secret = _env(
+            "CSAI_INTERNAL_SECRET", _env("SERVICE_CRED_INTERNAL_SECRET", ""))
+        self.csai_timeout = float(_env("CSAI_TIMEOUT", "30"))

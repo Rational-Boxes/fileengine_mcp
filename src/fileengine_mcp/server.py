@@ -40,6 +40,7 @@ from .guards import (GuardError, cap_read_bytes, cap_results, cap_write_bytes,
                      read_capped, within_allowlist)
 from .ldap_auth import resolve_roles
 from .service_cred_client import get_verifier
+from .csai_client import TextForbidden, TextUnavailable, text_client
 from .session import get_session, get_session_mf
 from ._client import ManagedFiles, NotFoundError
 
@@ -279,6 +280,47 @@ def read_file(uid: str) -> str:
     ``[base64]`` prefix. Content over ``MCP_MAX_READ_BYTES`` is rejected."""
     data = read_capped(_mf().get_stream(_norm_uid(uid)), config.max_read_bytes)
     return _content_to_text(data)
+
+
+@server.tool(annotations=_READ_HINT)
+@guarded("read_text")
+def read_text(uid: str) -> str:
+    """Read a document's extracted text (Markdown) by UID.
+
+    The readable alternative to ``read_file`` for anything that is not already
+    text: a .docx, .pptx, .xlsx or PDF comes back from ``read_file`` as base64,
+    because that is what the stored bytes are. This returns the Markdown produced
+    when the document was ingested — headings and paragraphs, no decoding.
+
+    Requires that the document has been indexed; a file that has just been
+    uploaded may not have been yet. Subject to the same READ permission as every
+    other tool."""
+    who = _active_identity()
+    if who is None:
+        # Mirrors _mf(): stdio with no bootstrap agent has nobody to ask as, and
+        # asserting an empty principal to CSAI would be asking it to gate on "".
+        raise GuardError("no identity bound to this request")
+    client = text_client(config)
+    try:
+        text, truncated = client.get_text(
+            _norm_uid(uid),
+            user=who.user,
+            roles=who.roles,
+            tenant=who.tenant,
+        )
+    except TextForbidden:
+        # GuardError, so this is audited as `denied` like every other refusal
+        # rather than as an internal error. The refusal is CSAI's, made by the
+        # same READ check the store would apply, so it belongs in the same
+        # column of the audit log as a subtree violation.
+        raise GuardError(f"not permitted to read the text of {uid}")
+    except TextUnavailable:
+        raise NotFoundError(
+            f"no extracted text for {uid} — it may not be indexed yet, or it may "
+            f"be a file type nothing can extract text from")
+    if truncated:
+        text += "\n\n[truncated: the document is longer than this service returns]"
+    return text
 
 
 @server.tool(annotations=_READ_HINT)
