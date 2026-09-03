@@ -120,3 +120,12 @@ class Config:
         self.csai_internal_secret = _env(
             "CSAI_INTERNAL_SECRET", _env("SERVICE_CRED_INTERNAL_SECRET", ""))
         self.csai_timeout = float(_env("CSAI_TIMEOUT", "30"))
+
+        # Base URL that `file_link` builds deep-links on, for the exceptional
+        # deployment where the request's Host is NOT the public FQDN (MCP reached
+        # directly, or behind a proxy that rewrites Host) — and for stdio, which
+        # has no request at all. A ``{tenant}`` placeholder is substituted with
+        # the caller's tenant, so one setting still gives each tenant its own
+        # host. Empty means "use the origin the request arrived on", which is
+        # right for every deployment behind the normal edge.
+        self.public_app_url = _env("MCP_PUBLIC_APP_URL", "")

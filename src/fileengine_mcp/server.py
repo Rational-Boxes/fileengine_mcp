@@ -30,6 +30,7 @@ import base64
 import functools
 import inspect
 import sys
+from urllib.parse import urlencode
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -365,6 +366,66 @@ def read_text(uid: str) -> str:
     if truncated:
         text += "\n\n[truncated: the document is longer than this service returns]"
     return text
+
+
+def _app_origin(tenant: str) -> str:
+    """The base URL to hang a deep-link off, or "" if there is none to be had.
+
+    The configured override wins — it exists for the deployment where the
+    request's Host is not the public FQDN, and for stdio, which has no request.
+    Otherwise the origin this request arrived on, which for every deployment
+    behind the normal edge IS the tenant's own app origin (nginx proxies /mcp/ on
+    each tenant vhost). See the note in http_app.AuthMiddleware for why a
+    client-supplied Host is safe to use here."""
+    override = (config.public_app_url or "").strip()
+    if override:
+        return override.replace("{tenant}", tenant).rstrip("/")
+    sess = get_session()
+    return (sess.origin if sess else "").rstrip("/")
+
+
+@server.tool(annotations=_READ_HINT)
+@guarded("file_link")
+def file_link(uid: str) -> dict:
+    """Build the shareable web link to a file or folder — a complete URL.
+
+    Use this whenever a file is being REFERENCED rather than read: in a report, a
+    summary, an email, a ticket. Anything written into a document leaves the
+    context it was written in, so a bare UID or a relative path is a dead end for
+    whoever reads it; this is the address that opens the file in the browser, for
+    someone signed in to that tenant.
+
+    Returns ``url`` (absolute, tenant-scoped), ``name``, ``kind``, and ``markdown``
+    — a ready-made ``[name](url)`` for dropping straight into prose.
+
+    The same link the web UI's "Copy link" button produces, deliberately: one
+    shape, so a link from an agent and a link from a person are the same link."""
+    info = _mf().stat(_norm_uid(uid))
+    # `folder` for a directory, `file` for a file. The frontend names the query
+    # key by kind (utils/fileLocation.ts) and both resolve to the same reveal —
+    # a folder opens, a file opens its parent and selects it.
+    kind = "folder" if info.is_dir else "file"
+    who = _active_identity()
+    tenant = who.tenant if who else config.tenant
+    origin = _app_origin(tenant)
+    if not origin:
+        # Refuse rather than hand back something relative. A half-formed link is
+        # worse than none: it looks usable, gets pasted into a document, and
+        # fails for the reader instead of for the agent that made it.
+        raise GuardError(
+            "no application origin to build a link on — this transport has no "
+            "request Host (stdio), so set MCP_PUBLIC_APP_URL")
+    # UIDs are tenant-scoped, so the tenant travels with the link, exactly as the
+    # SPA does it. Query order matches too, so the two are string-identical.
+    query = urlencode({kind: info.uid, "tenant": tenant})
+    url = f"{origin}/files?{query}"
+    return {
+        "uid": info.uid,
+        "name": info.name,
+        "kind": kind,
+        "url": url,
+        "markdown": f"[{info.name}]({url})",
+    }
 
 
 @server.tool(annotations=_READ_HINT)

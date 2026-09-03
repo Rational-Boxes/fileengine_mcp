@@ -32,6 +32,10 @@ class Session:
     identity: Identity
     mf: ManagedFiles
     label: str = "http"   # audit session label (e.g. the MCP session id)
+    # The origin this request arrived on (``https://acme.example.com``), for
+    # building deep-links that work outside a browser. Empty under stdio, which
+    # has no request and therefore no origin to speak of.
+    origin: str = ""
 
 
 _current: "contextvars.ContextVar[Optional[Session]]" = contextvars.ContextVar(
