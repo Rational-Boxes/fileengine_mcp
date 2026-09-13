@@ -95,6 +95,10 @@ class Config:
 
         # The LDAP identity the MCP server authenticates as (the agent's account)
         self.agent_user = _env("FILEENGINE_MCP_USER", _env("FILEENGINE_LDAP_USER", ""))
+        # Infrastructure identities exempt from the tenant-membership rule (they
+        # are not members of anything). Comma-separated; the service's own agent
+        # is always included. They carry NO tenant roles — see tenant_access.
+        self.service_principals = _env("FILEENGINE_SERVICE_PRINCIPALS", "")
         self.agent_password = _env("FILEENGINE_MCP_PASSWORD", _env("FILEENGINE_LDAP_PASSWORD", ""))
 
         # Service-credential (key:secret) auth (PROPOSAL §16) — the ONLY credential
