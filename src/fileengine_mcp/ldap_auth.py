@@ -26,6 +26,7 @@ from ldap3 import Server, Connection, ALL, SUBTREE
 from ldap3.core.exceptions import LDAPException
 
 from .failover import CircuitBreaker
+from .tenant_access import is_service_principal, roles_in_tenant
 
 
 @dataclass
@@ -124,16 +125,20 @@ def _resolve_roles_against(uri: str, cfg, username: str) -> Identity:
         if not svc.entries:
             return ident
         user_dn = svc.entries[0].entry_dn
-        roles: List[str] = []
-        svc.search(cfg.ldap_tenant_base,
-                   f"(&(objectClass=groupOfNames)(member={user_dn}))",
-                   search_scope=SUBTREE, attributes=["cn"])
-        for entry in svc.entries:
-            cn = str(entry.cn)
-            if cn and cn not in roles:
-                roles.append(cn)
-        if "administrators" in roles and "system_admin" not in roles:
-            roles.append("system_admin")
+        # Roles held in THIS tenant. Searching the whole tenant base returned a
+        # union across every tenant, so a user who was `administrators` anywhere
+        # arrived here holding system_admin in the tenant this server is pinned
+        # to. Empty means not a member.
+        roles = roles_in_tenant(svc, cfg, user_dn, ident.tenant)
+        if not roles:
+            # Infrastructure identities are not tenant members and hold no
+            # tenant roles; the core's ACL check stays their only authority.
+            if is_service_principal(cfg, username):
+                ident.roles = []
+                ident.authenticated = True
+                return ident
+            return ident          # authenticated=False: bound, but not a member
+
         ident.roles = roles
         ident.authenticated = True
         return ident
@@ -166,19 +171,19 @@ def _authenticate_against(uri: str, cfg, username: str, password: str) -> Identi
         except LDAPException:
             return ident
 
-        # Roles from group membership (groupOfNames with member=user_dn).
-        roles: List[str] = []
-        svc.search(cfg.ldap_tenant_base,
-                   f"(&(objectClass=groupOfNames)(member={user_dn}))",
-                   search_scope=SUBTREE, attributes=["cn"])
-        for entry in svc.entries:
-            cn = str(entry.cn)
-            if cn and cn not in roles:
-                roles.append(cn)
-
-        # A tenant administrator gets the core's privileged role.
-        if "administrators" in roles and "system_admin" not in roles:
-            roles.append("system_admin")
+        # Roles held in THIS tenant. Searching the whole tenant base returned a
+        # union across every tenant, so a user who was `administrators` anywhere
+        # arrived here holding system_admin in the tenant this server is pinned
+        # to. Empty means not a member.
+        roles = roles_in_tenant(svc, cfg, user_dn, ident.tenant)
+        if not roles:
+            # Infrastructure identities are not tenant members and hold no
+            # tenant roles; the core's ACL check stays their only authority.
+            if is_service_principal(cfg, username):
+                ident.roles = []
+                ident.authenticated = True
+                return ident
+            return ident          # authenticated=False: bound, but not a member
 
         ident.roles = roles
         ident.authenticated = True
