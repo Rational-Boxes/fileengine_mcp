@@ -95,13 +95,27 @@ def test_a_member_of_the_pinned_tenant_authenticates(monkeypatch):
     assert ident.authenticated and ident.roles == ["users"]
 
 
-def test_service_principal_holds_no_tenant_roles(monkeypatch):
+def test_service_principal_reaches_a_tenant_it_holds_no_group_in(monkeypatch):
     cfg = _cfg(agent_user="svc@platform.test")
     conn = _FakeConn({})
     monkeypatch.setattr(ldap_auth, "Server", lambda *a, **k: object())
     monkeypatch.setattr(ldap_auth, "Connection", lambda *a, **k: conn)
     ident = ldap_auth._authenticate_against("ldap://x", cfg, "SVC@Platform.test", "pw")
     assert ident.authenticated and ident.roles == []
+
+
+def test_service_principal_keeps_the_roles_it_holds_in_the_tenant(monkeypatch):
+    """The exemption skips the admission test — it does not blank roles.
+
+    Blanking them broke production: the workers reach the core as this
+    principal, and stripping every role turned operations they legitimately
+    perform into PermissionDenied."""
+    cfg = _cfg(agent_user="svc@platform.test")
+    conn = _FakeConn({"ou=alpha,ou=tenants,dc=x": ["administrators"]})
+    monkeypatch.setattr(ldap_auth, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(ldap_auth, "Connection", lambda *a, **k: conn)
+    ident = ldap_auth._authenticate_against("ldap://x", cfg, "svc@platform.test", "pw")
+    assert ident.authenticated and "administrators" in ident.roles
 
 
 def test_role_lookup_failure_fails_closed():

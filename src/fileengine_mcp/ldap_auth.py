@@ -130,13 +130,7 @@ def _resolve_roles_against(uri: str, cfg, username: str) -> Identity:
         # arrived here holding system_admin in the tenant this server is pinned
         # to. Empty means not a member.
         roles = roles_in_tenant(svc, cfg, user_dn, ident.tenant)
-        if not roles:
-            # Infrastructure identities are not tenant members and hold no
-            # tenant roles; the core's ACL check stays their only authority.
-            if is_service_principal(cfg, username):
-                ident.roles = []
-                ident.authenticated = True
-                return ident
+        if not roles and not is_service_principal(cfg, username):
             return ident          # authenticated=False: bound, but not a member
 
         ident.roles = roles
@@ -176,13 +170,7 @@ def _authenticate_against(uri: str, cfg, username: str, password: str) -> Identi
         # arrived here holding system_admin in the tenant this server is pinned
         # to. Empty means not a member.
         roles = roles_in_tenant(svc, cfg, user_dn, ident.tenant)
-        if not roles:
-            # Infrastructure identities are not tenant members and hold no
-            # tenant roles; the core's ACL check stays their only authority.
-            if is_service_principal(cfg, username):
-                ident.roles = []
-                ident.authenticated = True
-                return ident
+        if not roles and not is_service_principal(cfg, username):
             return ident          # authenticated=False: bound, but not a member
 
         ident.roles = roles
