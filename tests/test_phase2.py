@@ -23,22 +23,14 @@ import sys
 
 import pytest
 
-os.environ.setdefault("FILEENGINE_MCP_USER", "testuser")
-os.environ.setdefault("FILEENGINE_MCP_PASSWORD", "password")
 os.environ.setdefault("FILEENGINE_MCP_TENANT", "default")
 
 
-def _services_up() -> bool:
-    try:
-        from fileengine_mcp.config import Config
-        from fileengine_mcp.ldap_auth import authenticate
-        cfg = Config()
-        return authenticate(cfg, cfg.agent_user, cfg.agent_password).authenticated
-    except Exception:
-        return False
+# The live gate lives in conftest.py — one implementation, and it asks what the
+# server actually needs (a verified `mcp` key:secret) rather than an LDAP bind.
+from conftest import live, needs_delete  # noqa: E402
 
-
-pytestmark = pytest.mark.skipif(not _services_up(), reason="LDAP/core not reachable")
+pytestmark = live
 
 
 def _tool_names():
@@ -56,6 +48,7 @@ def test_write_tools_present_by_default():
     assert not any("purge" in n for n in names)
 
 
+@needs_delete
 def test_create_write_is_append_only():
     """write_file appends a version; the prior version stays readable (recoverable)."""
     from fileengine_mcp import server
@@ -73,6 +66,7 @@ def test_create_write_is_append_only():
     server.mf.remove(d)
 
 
+@needs_delete
 def test_restore_is_append_only():
     """restore_version adds a new version; it does not erase the one it overwrote."""
     from fileengine_mcp import server
@@ -91,6 +85,7 @@ def test_restore_is_append_only():
     server.mf.remove(d)
 
 
+@needs_delete
 def test_metadata_write_and_clear():
     from fileengine_mcp import server
     d = server.create_directory("root", f"mcp_p2m_{os.getpid()}")
@@ -104,6 +99,7 @@ def test_metadata_write_and_clear():
     server.mf.remove(d)
 
 
+@needs_delete
 def test_base64_roundtrip():
     import base64
     from fileengine_mcp import server
@@ -146,3 +142,42 @@ def test_allow_delete_gate_enables_soft_delete():
     assert "soft_delete" in names and "undelete" in names
     assert "write_file" in names           # writes still on
     assert not any("purge" in n for n in names)   # culling never appears
+
+
+@live
+def test_append_only_is_enforced_by_the_core_not_by_mcp(tmp_path=None):
+    """The MCP identity cannot delete, and the refusal comes from the CORE.
+
+    "Append-only, recoverable" is the claim this door is built on, and until now
+    it rested on MCP's own restraint plus a capability matrix nobody asserted: the
+    service credential is issued `read write` and no `delete`, so the core refuses
+    RemoveFile whatever the tools above it choose to offer. That is the property
+    worth pinning — a future capability grant, or a tool that reaches past the
+    guard, should fail HERE rather than in production.
+
+    Skipped (rather than inverted) where the identity DOES hold delete, because
+    then the deployment has deliberately chosen the other trade-off.
+    """
+    import pytest as _pytest
+    from conftest import HAS_DELETE
+    if HAS_DELETE:
+        _pytest.skip("this deployment granted mcp the 'delete' capability")
+
+    import os
+    from fileengine import exceptions as fe_exc
+    from fileengine_mcp import server
+
+    d = server.mf.mkdir("", f"mcp_appendonly_{os.getpid()}")
+    f = server.mf.touch(d, "cannot_be_removed.txt")
+    server.mf.put(f, b"written once")
+
+    with _pytest.raises(Exception) as caught:
+        server.mf.remove(f)
+    message = str(caught.value)
+    assert "capability" in message.lower(), (
+        f"expected a capability refusal from the core, got: {message}")
+
+    # The file is still there, and still readable: refused, not half-done.
+    # mf.get returns a file-like object, not bytes.
+    assert server.exists(f) is True
+    assert server.mf.get(f).read() == b"written once"
