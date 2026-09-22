@@ -24,29 +24,24 @@ import tempfile
 
 import pytest
 
-os.environ.setdefault("FILEENGINE_MCP_USER", "testuser")
-os.environ.setdefault("FILEENGINE_MCP_PASSWORD", "password")
 os.environ.setdefault("FILEENGINE_MCP_TENANT", "default")
 
-# The configured agent identity — audit records attribute tool calls to this
-# user. Assert against it rather than a hardcoded literal.
-_USER = os.environ["FILEENGINE_MCP_USER"]
+# The agent identity audit records attribute tool calls to. Under §16 that is
+# whatever the `mcp` key:secret resolves to, which only the server can say, so it
+# is read at call time — FILEENGINE_MCP_USER is not a credential for this door and
+# reading it with os.environ[...] stopped this module from even collecting.
+def _agent_user() -> str:
+    from fileengine_mcp import server
+    return server.identity.user if getattr(server, "identity", None) else ""
 
 
-# Importing fileengine_mcp.server authenticates the agent against LDAP at import
-# time, so any test that imports it is an integration test. Define the live gate
-# up front so those tests can be skipped when LDAP/core aren't reachable.
-def _services_up() -> bool:
-    try:
-        from fileengine_mcp.config import Config
-        from fileengine_mcp.ldap_auth import authenticate
-        cfg = Config()
-        return authenticate(cfg, cfg.agent_user, cfg.agent_password).authenticated
-    except Exception:
-        return False
+# Importing fileengine_mcp.server resolves the agent's credential at import time,
+# so any test that imports it is an integration test.
+# The live gate lives in conftest.py — one implementation, asking what the server
+# actually needs (a verified `mcp` key:secret) rather than an LDAP password bind.
+from conftest import live, needs_delete  # noqa: E402
 
 
-live = pytest.mark.skipif(not _services_up(), reason="LDAP/core not reachable")
 
 
 # ------------------------------ unit: guards ------------------------------
@@ -149,6 +144,7 @@ def _tree(server, tag):
 
 
 @live
+@needs_delete
 def test_subtree_allowlist_enforced():
     from fileengine_mcp import server
     from fileengine_mcp.guards import GuardError
@@ -168,6 +164,7 @@ def test_subtree_allowlist_enforced():
 
 
 @live
+@needs_delete
 def test_write_byte_cap_rejects_and_leaves_file_unchanged():
     from fileengine_mcp import server
     from fileengine_mcp.guards import GuardError
@@ -186,6 +183,7 @@ def test_write_byte_cap_rejects_and_leaves_file_unchanged():
 
 
 @live
+@needs_delete
 def test_audit_emitted_for_tool_call():
     from fileengine_mcp import server, audit
     a, b, f = _tree(server, "audit")
@@ -198,12 +196,13 @@ def test_audit_emitted_for_tool_call():
         audit.configure(server.config.audit_log_file)
     entries = [json.loads(ln[len("audit "):]) for ln in open(path).read().splitlines() if ln.startswith("audit ")]
     rec = [e for e in entries if e["tool"] == "read_file" and e["uid"] == f]
-    assert rec and rec[-1]["result"] == "ok" and rec[-1]["user"] == _USER
+    assert rec and rec[-1]["result"] == "ok" and rec[-1]["user"] == _agent_user()
     server.mf.remove(f); server.mf.remove(a); server.mf.remove(b)
 
 
 # ---- recoverability: "undo any mistake" (the product guarantee, §10) ----
 @live
+@needs_delete
 def test_undo_clobber_via_restore():
     from fileengine_mcp import server
     a, b, f = _tree(server, "clob")
@@ -216,6 +215,7 @@ def test_undo_clobber_via_restore():
 
 
 @live
+@needs_delete
 def test_undo_soft_delete_via_undelete():
     from fileengine_mcp import server
     a, b, f = _tree(server, "del")
@@ -228,6 +228,7 @@ def test_undo_soft_delete_via_undelete():
 
 
 @live
+@needs_delete
 def test_agent_gone_wrong_rolls_back_to_snapshot():
     """A chaotic multi-step sequence, then every change reversed with the tools
     the agent has — file returns to its pre-run snapshot (content, name, parent)."""

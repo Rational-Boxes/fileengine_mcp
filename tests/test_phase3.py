@@ -21,15 +21,23 @@ import os
 
 import pytest
 
-os.environ.setdefault("FILEENGINE_MCP_USER", "testuser")
-os.environ.setdefault("FILEENGINE_MCP_PASSWORD", "password")
 os.environ.setdefault("FILEENGINE_MCP_TENANT", "default")
 
-# The configured agent identity — what the server authenticates as and what
-# _services_up() checks. Tests assert against this rather than a hardcoded
-# literal so they track whatever test LDAP user the environment provides.
-_USER = os.environ["FILEENGINE_MCP_USER"]
-_PASS = os.environ["FILEENGINE_MCP_PASSWORD"]
+# The agent's credential and the identity it resolves to.
+#
+# Under §16 the door takes a `mcp`-scoped key:secret, not a directory password —
+# FILEENGINE_MCP_USER/_PASSWORD are not credentials for it at all, and reading
+# them with os.environ[...] made these modules fail to even COLLECT once the
+# stale defaults were removed. The user is whatever the credential resolves to,
+# which only the server can say, so it is read at call time rather than pinned to
+# a literal.
+_KEY = os.environ.get("FILEENGINE_MCP_KEY", "")
+_SECRET = os.environ.get("FILEENGINE_MCP_SECRET", "")
+
+
+def _agent_user() -> str:
+    from fileengine_mcp import server
+    return server.identity.user if getattr(server, "identity", None) else ""
 
 
 # --------------------------- unit: no services needed ---------------------------
@@ -96,17 +104,11 @@ def test_session_contextvar_and_mf_fallback():
 
 
 # ----------------------- integration: live LDAP + core --------------------------
-def _services_up() -> bool:
-    try:
-        from fileengine_mcp.config import Config
-        from fileengine_mcp.ldap_auth import authenticate
-        cfg = Config()
-        return authenticate(cfg, cfg.agent_user, cfg.agent_password).authenticated
-    except Exception:
-        return False
+# The live gate lives in conftest.py — one implementation, asking what the server
+# actually needs (a verified `mcp` key:secret) rather than an LDAP password bind.
+from conftest import live, needs_delete  # noqa: E402
 
 
-live = pytest.mark.skipif(not _services_up(), reason="LDAP/core not reachable")
 
 
 @pytest.fixture(scope="module")
@@ -120,15 +122,20 @@ def client():
         yield c
 
 
-def _basic(user=_USER, pw=_PASS):
+def _basic(key=None, secret=None):
+    # Basic on this door is key_id:secret (§16), not user:password.
     import base64
-    return {"Authorization": "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()}
+    key = _KEY if key is None else key
+    secret = _SECRET if secret is None else secret
+    return {"Authorization": "Basic " + base64.b64encode(f"{key}:{secret}".encode()).decode()}
 
 
 @live
 def test_token_endpoint_and_whoami(client):
-    assert client.post("/auth/token", json={"username": _USER, "password": "wrong"}).status_code == 401
-    r = client.post("/auth/token", json={"username": _USER, "password": _PASS})
+    # A wrong SECRET is rejected — and so is a directory password, which is the
+    # whole point of §16 and is covered offline in test_service_cred.py.
+    assert client.post("/auth/token", json={"key_id": _KEY, "secret": "wrong"}).status_code == 401
+    r = client.post("/auth/token", json={"key_id": _KEY, "secret": _SECRET})
     assert r.status_code == 200
     token = r.json()["access_token"]
     assert r.json()["token_type"] == "bearer"
@@ -137,12 +144,19 @@ def test_token_endpoint_and_whoami(client):
     who = client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
     assert who.status_code == 200
     body = who.json()
-    assert body["user"] == _USER
-    assert "administrators" in body["roles"] and "system_admin" in body["roles"]
-    assert body["tenant"] == "default"
+    assert body["user"] == _agent_user()
+    # Roles come from LDAP for the RESOLVED uid, so which ones depends on the
+    # account the credential was minted for. Asserting a literal set pinned this
+    # to one fixture — and to a mapping that no longer holds: since the H2 fix
+    # `administrators` aliases to tenant_admin, not system_admin, so the old
+    # assertion could not pass for any user. What must be true is that roles were
+    # resolved at all, and that the session is in the configured tenant.
+    assert body["roles"], "the door resolved no roles for the agent"
+    assert body["tenant"] == os.environ.get("FILEENGINE_MCP_TENANT", "default")
 
 
 @live
+@needs_delete
 def test_basic_auth_and_per_session_tenancy(client):
     who = client.get("/whoami", headers=_basic())
     assert who.status_code == 200 and who.json()["tenant"] == "default"

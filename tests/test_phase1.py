@@ -22,22 +22,14 @@ import time
 
 import pytest
 
-os.environ.setdefault("FILEENGINE_MCP_USER", "testuser")
-os.environ.setdefault("FILEENGINE_MCP_PASSWORD", "password")
 os.environ.setdefault("FILEENGINE_MCP_TENANT", "default")
 
 
-def _services_up() -> bool:
-    try:
-        from fileengine_mcp.config import Config
-        from fileengine_mcp.ldap_auth import authenticate
-        cfg = Config()
-        return authenticate(cfg, cfg.agent_user, cfg.agent_password).authenticated
-    except Exception:
-        return False
+# The live gate lives in conftest.py — one implementation, and it asks what the
+# server actually needs (a verified `mcp` key:secret) rather than an LDAP bind.
+from conftest import live, needs_delete  # noqa: E402
 
-
-pytestmark = pytest.mark.skipif(not _services_up(), reason="LDAP/core not reachable")
+pytestmark = live
 
 
 def _mkfile(mf, name):
@@ -46,6 +38,7 @@ def _mkfile(mf, name):
     return d, f
 
 
+@needs_delete
 def test_stat_and_exists():
     from fileengine_mcp import server
     d, f = _mkfile(server.mf, "s.txt")
@@ -59,6 +52,7 @@ def test_stat_and_exists():
     server.mf.remove(d)
 
 
+@needs_delete
 def test_versions_and_time_travel():
     """The immutable-history guarantee: an old version is still readable after a
     newer write (time travel)."""
@@ -76,6 +70,7 @@ def test_versions_and_time_travel():
     server.mf.remove(d)
 
 
+@needs_delete
 def test_metadata_and_permission():
     from fileengine_mcp import server
     d, f = _mkfile(server.mf, "m.txt")
@@ -89,6 +84,7 @@ def test_metadata_and_permission():
     server.mf.remove(d)
 
 
+@needs_delete
 def test_version_resource_time_travel():
     """Read a historical version through the MCP resource URI."""
     from fileengine_mcp import server

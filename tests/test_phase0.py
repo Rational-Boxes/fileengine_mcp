@@ -25,22 +25,14 @@ import os
 
 import pytest
 
-os.environ.setdefault("FILEENGINE_MCP_USER", "testuser")
-os.environ.setdefault("FILEENGINE_MCP_PASSWORD", "password")
 os.environ.setdefault("FILEENGINE_MCP_TENANT", "default")
 
 
-def _services_up() -> bool:
-    try:
-        from fileengine_mcp.config import Config
-        from fileengine_mcp.ldap_auth import authenticate
-        cfg = Config()
-        return authenticate(cfg, cfg.agent_user, cfg.agent_password).authenticated
-    except Exception:
-        return False
+# The live gate lives in conftest.py — one implementation, and it asks what the
+# server actually needs (a verified `mcp` key:secret) rather than an LDAP bind.
+from conftest import live, needs_delete  # noqa: E402
 
-
-pytestmark = pytest.mark.skipif(not _services_up(), reason="LDAP/core not reachable")
+pytestmark = live
 
 
 def test_ldap_identity_resolved():
@@ -61,6 +53,7 @@ def test_list_directory_root():
         assert e["type"] in ("file", "directory")
 
 
+@needs_delete
 def test_read_file_roundtrip():
     """Create a file, write content, and read it back through the tools' client."""
     from fileengine_mcp import server
