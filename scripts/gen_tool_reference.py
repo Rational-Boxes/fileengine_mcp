@@ -58,8 +58,8 @@ async def main() -> None:
     out.append("_Generated from the running server with `scripts/gen_tool_reference.py`._")
     out.append("")
     out.append(f"Surface for this configuration: **{len(tools)} tools**. The set "
-               "depends on `MCP_READ_ONLY` / `MCP_ALLOW_DELETE`; "
-               "version culling and hard delete are never present.")
+               "depends on `MCP_READ_ONLY`; nothing that removes anything is ever "
+               "present — no delete, no undelete, no version culling.")
     out.append("")
     out.append("## Tools")
     out.append("")
@@ -79,7 +79,9 @@ async def main() -> None:
     out.append("## Never exposed (by design)")
     out.append("")
     out.append("- **`purge_old_versions` / any version culling** — under no flag or role.")
-    out.append("- **Hard delete** — the only delete is reversible `soft_delete` (gated).")
+    out.append("- **Delete of any kind** — hard or soft. This door's service credential "
+               "is issued `read write restore`, so the core refuses every removal RPC "
+               "to it; the tool surface is cut to match.")
     out.append("- Role/ACL administration and `trigger_sync` — manage via the CLI / HTTP bridge.")
     print("\n".join(out))
 

@@ -19,7 +19,8 @@ six design phases complete. The product guarantee — *a storage service that ca
 always be restored regardless of any AI mistake* — is enforced structurally and
 proven end-to-end in the test suite.
 
-**Read tools (8, always on):** `list_directory`, `read_file`, `stat`, `exists`,
+**Read tools (11, always on):** `list_directory`, `read_file`, `search`,
+`read_text` (a document's extracted Markdown), `file_link`, `stat`, `exists`,
 `list_versions`, `read_version` (time-travel), `get_metadata`, `check_permission`.
 
 **Write tools (9, append-only; hidden when `MCP_READ_ONLY=1`):**
@@ -28,8 +29,13 @@ proven end-to-end in the test suite.
 `write_file`/`restore_version` *appends* a version — prior bytes always remain
 readable via `read_version`.
 
-**Soft delete (2, off unless `MCP_ALLOW_DELETE=1`):** `soft_delete`, `undelete`
-— reversible hide; the entity and its full history persist.
+**Delete tools: none, under any setting.** No soft delete, no undelete, no
+with-deleted listing, no hard delete, no version culling. This is not restraint
+on the server's part — the service credential this door presents to the core
+holds `read write restore` and nothing else, so every removal RPC is refused
+before it reaches a handler. The surface is cut to match that set exactly,
+because a tool an agent is offered and can never use is worse than an absent one.
+Removal is a person's decision, made through the web UI or the REST door.
 
 **Resources:**
 - `fileengine://{tenant}/{uid}` — current file content
@@ -70,11 +76,12 @@ they never grant access the core would deny):
 - **Confirmation hints** — tools carry `readOnlyHint` (reads) /
   `destructiveHint` / `idempotentHint` so MCP hosts can prompt before mutations.
 
-Because every write is append-only and the soft-delete is reversible, **any
-agent mistake is recoverable** with the tools the agent already has — a chaotic
-write→rename→move→delete sequence rolls back to a pre-run snapshot
-(`restore_version` + reverse `rename`/`move` + `undelete`), verified in the test
-suite.
+Because every write is append-only and nothing on this door removes anything,
+**any agent mistake is recoverable** with the tools the agent already has — a
+chaotic write→rename→move sequence rolls back to a pre-run snapshot
+(`restore_version` + reverse `rename`/`move`), verified in the test suite. The
+guarantee is not that the agent can undo itself; it is that there is nothing it
+can do that it cannot undo.
 
 ## Transports
 
@@ -120,7 +127,6 @@ stdio with the LDAP credentials in its environment.
 | `FILEENGINE_MCP_TENANT` | tenant for this process (default `default`) |
 | `FILEENGINE_LDAP_*` | LDAP endpoint / domain / bind / bases |
 | `MCP_READ_ONLY` | `1` hides all write tools (read/browse only); default `0` |
-| `MCP_ALLOW_DELETE` | `1` enables reversible `soft_delete`/`undelete`; default `0` |
 | `MCP_HTTP_HOST` / `_PORT` | Streamable HTTP bind address (default `127.0.0.1:8089`) |
 | `MCP_TOKEN_TTL` | bearer-token lifetime in seconds (default `3600`) |
 | `MCP_MAX_READ_BYTES` / `_WRITE_BYTES` | per-call size caps (default 10 MiB; `0` disables) |

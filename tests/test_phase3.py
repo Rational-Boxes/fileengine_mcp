@@ -106,7 +106,7 @@ def test_session_contextvar_and_mf_fallback():
 # ----------------------- integration: live LDAP + core --------------------------
 # The live gate lives in conftest.py — one implementation, asking what the server
 # actually needs (a verified `mcp` key:secret) rather than an LDAP password bind.
-from conftest import live, needs_delete  # noqa: E402
+from conftest import live, cleanup  # noqa: E402
 
 
 
@@ -156,13 +156,32 @@ def test_token_endpoint_and_whoami(client):
 
 
 @live
-@needs_delete
-def test_basic_auth_and_per_session_tenancy(client):
+def test_basic_auth_is_bound_to_the_credentials_tenant(client):
+    """X-Tenant selects a session's tenant, but it cannot move a credential.
+
+    A `key:secret` is minted IN a tenant and stored with it
+    (`service_credential.tenant`); ldap_manager's verify matches on key_id AND
+    tenant, so a pin to any other tenant simply fails to verify and the door
+    answers 401. That holds even for a tenant the human who minted the key
+    belongs to — this door authenticates the credential, not the person, and one
+    credential is one tenant's.
+
+    The original assertion pinned "acme" and expected a 200 session in it. It was
+    never run: the test sat behind a `delete`-capability probe that has nothing to
+    do with what it measures.
+    """
+    home = os.environ.get("FILEENGINE_MCP_TENANT", "default")
     who = client.get("/whoami", headers=_basic())
-    assert who.status_code == 200 and who.json()["tenant"] == "default"
-    # X-Tenant scopes this session to a different tenant
-    scoped = client.get("/whoami", headers={**_basic(), "X-Tenant": "acme"})
-    assert scoped.status_code == 200 and scoped.json()["tenant"] == "acme"
+    assert who.status_code == 200 and who.json()["tenant"] == home
+    # Pinning the credential's own tenant explicitly is the same session.
+    same = client.get("/whoami", headers={**_basic(), "X-Tenant": home})
+    assert same.status_code == 200 and same.json()["tenant"] == home
+    # Any other tenant: refused. Both a tenant the minter is a member of...
+    member_elsewhere = os.environ.get("FILEENGINE_MCP_TENANT2", "filenginetest")
+    assert client.get("/whoami",
+                      headers={**_basic(), "X-Tenant": member_elsewhere}).status_code == 401
+    # ...and one nobody here belongs to.
+    assert client.get("/whoami", headers={**_basic(), "X-Tenant": "acme"}).status_code == 401
 
 
 @live

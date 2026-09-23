@@ -39,7 +39,7 @@ def _agent_user() -> str:
 # so any test that imports it is an integration test.
 # The live gate lives in conftest.py — one implementation, asking what the server
 # actually needs (a verified `mcp` key:secret) rather than an LDAP password bind.
-from conftest import live, needs_delete  # noqa: E402
+from conftest import live, cleanup, fixtures_root  # noqa: E402
 
 
 
@@ -137,14 +137,13 @@ def test_confirmation_hint_annotations():
 
 
 def _tree(server, tag):
-    a = server.create_directory("root", f"mcp_p4_{tag}_{os.getpid()}_A")
-    b = server.create_directory("root", f"mcp_p4_{tag}_{os.getpid()}_B")
+    a = server.create_directory(fixtures_root(), f"mcp_p4_{tag}_{os.getpid()}_A")
+    b = server.create_directory(fixtures_root(), f"mcp_p4_{tag}_{os.getpid()}_B")
     f = server.create_file(a, "doc.txt")
     return a, b, f
 
 
 @live
-@needs_delete
 def test_subtree_allowlist_enforced():
     from fileengine_mcp import server
     from fileengine_mcp.guards import GuardError
@@ -160,11 +159,10 @@ def test_subtree_allowlist_enforced():
             server.list_directory(b)                 # sibling subtree
     finally:
         server.config.subtree_allowlist = []
-    server.mf.remove(f); server.mf.remove(a); server.mf.remove(b)
+    cleanup(f, a, b)
 
 
 @live
-@needs_delete
 def test_write_byte_cap_rejects_and_leaves_file_unchanged():
     from fileengine_mcp import server
     from fileengine_mcp.guards import GuardError
@@ -179,11 +177,10 @@ def test_write_byte_cap_rejects_and_leaves_file_unchanged():
         server.config.max_write_bytes = 10 * 1024 * 1024
     assert len(server.list_versions(f)) == versions_before  # rejected before put
     assert server.read_file(f) == "ok"
-    server.mf.remove(f); server.mf.remove(a); server.mf.remove(b)
+    cleanup(f, a, b)
 
 
 @live
-@needs_delete
 def test_audit_emitted_for_tool_call():
     from fileengine_mcp import server, audit
     a, b, f = _tree(server, "audit")
@@ -197,12 +194,11 @@ def test_audit_emitted_for_tool_call():
     entries = [json.loads(ln[len("audit "):]) for ln in open(path).read().splitlines() if ln.startswith("audit ")]
     rec = [e for e in entries if e["tool"] == "read_file" and e["uid"] == f]
     assert rec and rec[-1]["result"] == "ok" and rec[-1]["user"] == _agent_user()
-    server.mf.remove(f); server.mf.remove(a); server.mf.remove(b)
+    cleanup(f, a, b)
 
 
 # ---- recoverability: "undo any mistake" (the product guarantee, §10) ----
 @live
-@needs_delete
 def test_undo_clobber_via_restore():
     from fileengine_mcp import server
     a, b, f = _tree(server, "clob")
@@ -211,24 +207,30 @@ def test_undo_clobber_via_restore():
     server.write_file(f, "CLOBBERED")
     server.restore_version(f, snapshot)              # the agent's undo
     assert server.read_file(f) == "good"
-    server.mf.remove(f); server.mf.remove(a); server.mf.remove(b)
+    cleanup(f, a, b)
 
 
 @live
-@needs_delete
-def test_undo_soft_delete_via_undelete():
+def test_there_is_no_delete_to_undo():
+    """The other half of the recoverability guarantee: an agent cannot make the
+    mistake that needs undoing, because removal is not on this door.
+
+    This replaces a test that soft-deleted a file and undeleted it. Both tools
+    are gone — the credential holds no `delete`, so they could only ever be
+    refused — and what is worth pinning now is that they did not come back and
+    that nothing else reaches the same RPC.
+    """
+    import asyncio
     from fileengine_mcp import server
-    a, b, f = _tree(server, "del")
+    names = {t.name for t in asyncio.run(server.server.list_tools())}
+    assert not (names & {"soft_delete", "undelete", "delete_file", "remove"})
+    a, b, f = _tree(server, "nodel")
     server.write_file(f, "alive")
-    assert server.soft_delete(f) is True
-    assert server.exists(f) is False                 # hidden
-    assert server.undelete(f) is True
-    assert server.exists(f) is True and server.read_file(f) == "alive"
-    server.mf.remove(f); server.mf.remove(a); server.mf.remove(b)
+    assert server.exists(f) is True
+    cleanup(f, a, b)
 
 
 @live
-@needs_delete
 def test_agent_gone_wrong_rolls_back_to_snapshot():
     """A chaotic multi-step sequence, then every change reversed with the tools
     the agent has — file returns to its pre-run snapshot (content, name, parent)."""
@@ -240,14 +242,16 @@ def test_agent_gone_wrong_rolls_back_to_snapshot():
     orig_parent = server.stat(f)["parent_uid"]
 
     # --- agent goes wrong ---
+    # No soft_delete in the mess: it is not a mistake this door can make. Every
+    # step here is reversible with a tool the agent is actually given, which is
+    # the point — the guarantee is not "it can undo itself", it is "there is
+    # nothing it can do that it cannot undo".
     server.write_file(f, "garbage 1")
     server.write_file(f, "garbage 2")
     server.rename(f, "WRONG.txt")
     server.move(f, b)
-    server.soft_delete(f)
 
     # --- recovery, using only exposed tools ---
-    server.undelete(f)
     server.move(f, orig_parent)
     server.rename(f, orig_name)
     server.restore_version(f, snapshot)
@@ -257,4 +261,4 @@ def test_agent_gone_wrong_rolls_back_to_snapshot():
     assert server.stat(f)["parent_uid"] == orig_parent
     # the whole mistaken history is still there — nothing was ever culled
     assert "garbage 2" in [server.read_version(f, v) for v in server.list_versions(f)]
-    server.mf.remove(f); server.mf.remove(a); server.mf.remove(b)
+    cleanup(f, a, b)

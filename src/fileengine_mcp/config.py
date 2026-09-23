@@ -51,8 +51,10 @@ class Config:
         # Tenant (one per stdio process) and mode
         self.tenant = _env("FILEENGINE_MCP_TENANT", "default")
         self.read_only = _env("MCP_READ_ONLY", "0").lower() in ("1", "true", "yes")
-        # Soft delete / undelete are append-only-safe (reversible) but still gated.
-        self.allow_delete = _env("MCP_ALLOW_DELETE", "0").lower() in ("1", "true", "yes")
+        # There is no MCP_ALLOW_DELETE. It used to gate soft_delete/undelete; the
+        # service credential holds no `delete` capability, so the flag's only
+        # possible effect was to publish two tools the core refuses. Removal is
+        # not a knob on this door.
 
         # Streamable HTTP transport (remote/multi-agent; run behind TLS).
         self.http_host = _env("MCP_HTTP_HOST", "127.0.0.1")

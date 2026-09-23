@@ -27,18 +27,17 @@ os.environ.setdefault("FILEENGINE_MCP_TENANT", "default")
 
 # The live gate lives in conftest.py — one implementation, and it asks what the
 # server actually needs (a verified `mcp` key:secret) rather than an LDAP bind.
-from conftest import live, needs_delete  # noqa: E402
+from conftest import live, cleanup, fixtures_root  # noqa: E402
 
 pytestmark = live
 
 
 def _mkfile(mf, name):
-    d = mf.mkdir("", f"mcp_p1_{os.getpid()}_{name}")
+    d = mf.mkdir(fixtures_root(), f"mcp_p1_{os.getpid()}_{name}")
     f = mf.touch(d, name)
     return d, f
 
 
-@needs_delete
 def test_stat_and_exists():
     from fileengine_mcp import server
     d, f = _mkfile(server.mf, "s.txt")
@@ -48,11 +47,9 @@ def test_stat_and_exists():
     assert server.stat(d)["type"] == "directory"
     assert server.exists(f) is True
     assert server.exists("deadbeef-0000-0000-0000-000000000000") is False
-    server.mf.remove(f)
-    server.mf.remove(d)
+    cleanup(f, d)
 
 
-@needs_delete
 def test_versions_and_time_travel():
     """The immutable-history guarantee: an old version is still readable after a
     newer write (time travel)."""
@@ -66,11 +63,9 @@ def test_versions_and_time_travel():
     oldest = versions[-1]
     assert server.read_version(f, oldest) == "v1"   # original preserved
     assert server.read_file(f) == "v2"              # current
-    server.mf.remove(f)
-    server.mf.remove(d)
+    cleanup(f, d)
 
 
-@needs_delete
 def test_metadata_and_permission():
     from fileengine_mcp import server
     d, f = _mkfile(server.mf, "m.txt")
@@ -78,13 +73,22 @@ def test_metadata_and_permission():
     server.mf.set_metadata_value(f, "color", "blue")
     assert server.get_metadata(f, "color") == {"color": "blue"}
     assert server.get_metadata(f).get("color") == "blue"
-    server.mf.grant_permission(f, "dave", "r")
-    assert server.check_permission(f, "r", principal="dave") is True
-    server.mf.remove(f)
-    server.mf.remove(d)
+    # check_permission reads the decision for the caller's own identity.
+    assert server.check_permission(f, "r") is True
+    # It does not become an ACL editor: this door's credential holds no `acl`,
+    # so GrantPermission is refused in the core's interceptor — the same shape as
+    # the removal refusal in test_phase2, and for the same reason. Granting
+    # rights is an administrative act, not something an agent does mid-task.
+    # (This used to grant "dave" READ and assert the grant took, which needed a
+    # capability MCP has never held; it was invisible because the test was gated
+    # behind a `delete` probe it did not otherwise need.)
+    import pytest as _pytest
+    with _pytest.raises(Exception) as caught:
+        server.mf.grant_permission(f, "dave", "r")
+    assert "capability" in str(caught.value).lower()
+    cleanup(f, d)
 
 
-@needs_delete
 def test_version_resource_time_travel():
     """Read a historical version through the MCP resource URI."""
     from fileengine_mcp import server
@@ -101,8 +105,7 @@ def test_version_resource_time_travel():
     contents = asyncio.run(run())
     text = getattr(contents[0], "content", contents[0])
     assert text == "r1"
-    server.mf.remove(f)
-    server.mf.remove(d)
+    cleanup(f, d)
 
 
 def test_read_tools_present_and_no_culling():

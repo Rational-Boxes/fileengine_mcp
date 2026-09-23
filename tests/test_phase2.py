@@ -28,7 +28,7 @@ os.environ.setdefault("FILEENGINE_MCP_TENANT", "default")
 
 # The live gate lives in conftest.py — one implementation, and it asks what the
 # server actually needs (a verified `mcp` key:secret) rather than an LDAP bind.
-from conftest import live, needs_delete  # noqa: E402
+from conftest import live, cleanup, fixtures_root  # noqa: E402
 
 pytestmark = live
 
@@ -42,17 +42,16 @@ def test_write_tools_present_by_default():
     names = _tool_names()
     assert {"create_directory", "create_file", "write_file", "set_metadata",
             "delete_metadata", "rename", "move", "copy", "restore_version"} <= names
-    # delete tools are gated OFF by default
+    # nothing that removes, in any configuration: the credential this door
+    # presents holds no `delete`, so such a tool could only ever be refused
     assert "soft_delete" not in names and "undelete" not in names
-    # never, under any config
     assert not any("purge" in n for n in names)
 
 
-@needs_delete
 def test_create_write_is_append_only():
     """write_file appends a version; the prior version stays readable (recoverable)."""
     from fileengine_mcp import server
-    d = server.create_directory("root", f"mcp_p2_{os.getpid()}")
+    d = server.create_directory(fixtures_root(), f"mcp_p2_{os.getpid()}")
     f = server.create_file(d, "doc.txt")
     r1 = server.write_file(f, "first")
     assert r1["versions_after"] == r1["versions_before"] + 1
@@ -62,15 +61,13 @@ def test_create_write_is_append_only():
     assert len(versions) >= 2
     assert server.read_file(f) == "second"
     assert server.read_version(f, versions[-1]) == "first"   # original preserved
-    server.mf.remove(f)
-    server.mf.remove(d)
+    cleanup(f, d)
 
 
-@needs_delete
 def test_restore_is_append_only():
     """restore_version adds a new version; it does not erase the one it overwrote."""
     from fileengine_mcp import server
-    d = server.create_directory("root", f"mcp_p2r_{os.getpid()}")
+    d = server.create_directory(fixtures_root(), f"mcp_p2r_{os.getpid()}")
     f = server.create_file(d, "doc.txt")
     server.write_file(f, "good")
     server.write_file(f, "bad")
@@ -81,36 +78,31 @@ def test_restore_is_append_only():
     assert len(after) == before + 1               # restore appended, nothing lost
     assert server.read_file(f) == "good"          # content recovered
     assert server.read_version(f, after[1]) == "bad"  # the mistake still in history
-    server.mf.remove(f)
-    server.mf.remove(d)
+    cleanup(f, d)
 
 
-@needs_delete
 def test_metadata_write_and_clear():
     from fileengine_mcp import server
-    d = server.create_directory("root", f"mcp_p2m_{os.getpid()}")
+    d = server.create_directory(fixtures_root(), f"mcp_p2m_{os.getpid()}")
     f = server.create_file(d, "doc.txt")
     server.write_file(f, "x")
     assert server.set_metadata(f, "k", "v") is True
     assert server.get_metadata(f, "k") == {"k": "v"}
     assert server.delete_metadata(f, "k") is True
     assert server.get_metadata(f).get("k") is None
-    server.mf.remove(f)
-    server.mf.remove(d)
+    cleanup(f, d)
 
 
-@needs_delete
 def test_base64_roundtrip():
     import base64
     from fileengine_mcp import server
-    d = server.create_directory("root", f"mcp_p2b_{os.getpid()}")
+    d = server.create_directory(fixtures_root(), f"mcp_p2b_{os.getpid()}")
     f = server.create_file(d, "blob.bin")
     payload = bytes(range(256))
     server.write_file(f, base64.b64encode(payload).decode(), as_="base64")
     # non-UTF-8 content comes back base64-prefixed
     assert server.read_file(f) == "[base64] " + base64.b64encode(payload).decode()
-    server.mf.remove(f)
-    server.mf.remove(d)
+    cleanup(f, d)
 
 
 # --- env-gated surface, verified in a fresh process so registration re-runs ---
@@ -131,35 +123,46 @@ def _surface_in_subprocess(env_extra):
 def test_read_only_mode_hides_writes():
     names = _surface_in_subprocess({"MCP_READ_ONLY": "1"})
     for w in ("create_directory", "create_file", "write_file", "set_metadata",
-              "delete_metadata", "rename", "move", "copy", "restore_version",
-              "soft_delete", "undelete"):
+              "delete_metadata", "rename", "move", "copy", "restore_version"):
         assert w not in names, f"{w} leaked in read-only mode"
     assert "read_file" in names and "list_versions" in names  # reads remain
 
 
-def test_allow_delete_gate_enables_soft_delete():
+def test_no_environment_setting_can_add_a_removal_tool():
+    """MCP_ALLOW_DELETE used to publish soft_delete/undelete. It is gone, and the
+    name is asserted dead: setting it must not resurrect them.
+
+    Kept as a test rather than deleted with the flag because the flag outlives
+    the code — it is still written in old deployment configs and in the example
+    host config that shipped with earlier versions, where it now means nothing.
+    An operator who set it must get a door with no removal on it, not a surprise.
+    """
     names = _surface_in_subprocess({"MCP_ALLOW_DELETE": "1"})
-    assert "soft_delete" in names and "undelete" in names
+    assert "soft_delete" not in names and "undelete" not in names
     assert "write_file" in names           # writes still on
-    assert not any("purge" in n for n in names)   # culling never appears
+    assert "restore_version" in names      # the undo for a bad one
+    assert not any("purge" in n for n in names)
 
 
 @live
 def test_append_only_is_enforced_by_the_core_not_by_mcp(tmp_path=None):
     """The MCP identity cannot delete, and the refusal comes from the CORE.
 
-    "Append-only, recoverable" is the claim this door is built on, and until now
-    it rested on MCP's own restraint plus a capability matrix nobody asserted: the
-    service credential is issued `read write` and no `delete`, so the core refuses
-    RemoveFile whatever the tools above it choose to offer. That is the property
-    worth pinning — a future capability grant, or a tool that reaches past the
-    guard, should fail HERE rather than in production.
+    "Append-only, recoverable" is the claim this door is built on, and it does not
+    rest on the tool list being short: the service credential is issued
+    `read write restore` and no `delete`, so the core refuses RemoveFile whatever
+    the tools above it choose to offer. That is the property worth pinning — a
+    future capability grant, or a tool that reaches past the guard, should fail
+    HERE rather than in production.
+
+    `restore` is in that set and is not an exception to it: RestoreToVersion
+    inserts a new version row pointing at the older payload and removes nothing.
 
     Skipped (rather than inverted) where the identity DOES hold delete, because
     then the deployment has deliberately chosen the other trade-off.
     """
     import pytest as _pytest
-    from conftest import HAS_DELETE
+    from conftest import HAS_DELETE, fixtures_root
     if HAS_DELETE:
         _pytest.skip("this deployment granted mcp the 'delete' capability")
 
@@ -167,7 +170,7 @@ def test_append_only_is_enforced_by_the_core_not_by_mcp(tmp_path=None):
     from fileengine import exceptions as fe_exc
     from fileengine_mcp import server
 
-    d = server.mf.mkdir("", f"mcp_appendonly_{os.getpid()}")
+    d = server.mf.mkdir(fixtures_root(), f"mcp_appendonly_{os.getpid()}")
     f = server.mf.touch(d, "cannot_be_removed.txt")
     server.mf.put(f, b"written once")
 
