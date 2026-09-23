@@ -27,7 +27,9 @@ proven end-to-end in the test suite.
 `create_directory`, `create_file`, `write_file`, `set_metadata`,
 `delete_metadata`, `rename`, `move`, `copy`, `restore_version`. Every
 `write_file`/`restore_version` *appends* a version — prior bytes always remain
-readable via `read_version`.
+readable via `read_version`. Reorganising the tree is a write like any other:
+`move` keeps the entity's uid and its whole history and is reversible with
+itself, and `copy` only ever adds.
 
 **Delete tools: none, under any setting.** No soft delete, no undelete, no
 with-deleted listing, no hard delete, no version culling. This is not restraint

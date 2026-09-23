@@ -81,6 +81,46 @@ def test_restore_is_append_only():
     cleanup(f, d)
 
 
+def test_move_and_copy():
+    """Reorganising the tree is a WRITE, and this door does it.
+
+    `Move` and `Copy` are `Capability::Write` in the core's method table, which
+    this credential holds — nothing about withholding `delete` withholds these.
+    Moving is not removing: the entity keeps its uid and its whole version
+    history, only its parent changes, and moving it back restores exactly what
+    was there. Copy adds; it never displaces what it lands beside.
+
+    `move` was exercised only incidentally inside the chaos test, and `copy` not
+    at all — the surface test asserted the tools were LISTED and nothing asserted
+    they work.
+    """
+    from fileengine_mcp import server
+    a = server.create_directory(fixtures_root(), f"mcp_p2mv_{os.getpid()}_A")
+    b = server.create_directory(fixtures_root(), f"mcp_p2mv_{os.getpid()}_B")
+    f = server.create_file(a, "doc.txt")
+    server.write_file(f, "payload")
+    versions_before = server.list_versions(f)
+
+    assert server.move(f, b) is True
+    assert server.stat(f)["parent_uid"] == b
+    assert server.stat(f)["uid"] == f                 # same entity, new parent
+    assert server.list_versions(f) == versions_before  # history travels with it
+    assert server.read_file(f) == "payload"
+
+    assert server.copy(f, a) is True
+    landed = {e["name"]: e["uid"] for e in server.list_directory(a)}
+    assert "doc.txt" in landed
+    assert landed["doc.txt"] != f                     # a new entity, not a link
+    assert server.read_file(landed["doc.txt"]) == "payload"
+    # ...and the original is untouched where the move left it
+    assert server.stat(f)["parent_uid"] == b
+
+    # A move is reversible with the same tool, which is why it needs no undo.
+    assert server.move(f, a) is True
+    assert server.stat(f)["parent_uid"] == a
+    cleanup(landed["doc.txt"], f, a, b)
+
+
 def test_metadata_write_and_clear():
     from fileengine_mcp import server
     d = server.create_directory(fixtures_root(), f"mcp_p2m_{os.getpid()}")
