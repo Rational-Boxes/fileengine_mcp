@@ -30,7 +30,7 @@ os.environ.setdefault("FILEENGINE_MCP_TENANT", "default")
 
 # The live gate lives in conftest.py — one implementation, and it asks what the
 # server actually needs (a verified `mcp` key:secret) rather than an LDAP bind.
-from conftest import live, needs_delete  # noqa: E402
+from conftest import live, cleanup, fixtures_root  # noqa: E402
 
 pytestmark = live
 
@@ -53,25 +53,32 @@ def test_list_directory_root():
         assert e["type"] in ("file", "directory")
 
 
-@needs_delete
 def test_read_file_roundtrip():
     """Create a file, write content, and read it back through the tools' client."""
     from fileengine_mcp import server
     mf = server.mf
-    d = mf.mkdir("", f"mcp_phase0_{os.getpid()}")
+    d = mf.mkdir(fixtures_root(), f"mcp_phase0_{os.getpid()}")
     assert d
     f = mf.touch(d, "hello.txt")
     mf.put(f, b"hello from mcp")
     assert server.read_file(f) == "hello from mcp"
-    mf.remove(f)
-    mf.remove(d)
+    cleanup(f, d)
 
 
-def test_no_version_culling_or_hard_delete_tool():
-    """Recoverability invariant: no version-culling or hard-delete tool is ever
-    exposed on the agent surface, regardless of write/delete config."""
+def test_nothing_that_removes_is_on_the_surface():
+    """Recoverability invariant: NO tool that removes anything is exposed, in any
+    configuration — not version culling, not hard delete, and since the surface
+    was cut to the door's capabilities, not the reversible soft delete either.
+
+    The matching half of this is asserted in test_phase2: the core refuses the
+    removal RPCs to this identity, so the guarantee does not rest on the list
+    below staying short."""
     import asyncio
     from fileengine_mcp import server
     names = {t.name for t in asyncio.run(server.server.list_tools())}
     assert not any("purge" in n or "cull" in n or "hard_delete" in n for n in names)
     assert "purge_old_versions" not in names
+    assert "soft_delete" not in names and "undelete" not in names
+    # and the with-deleted listing, which the core classes with `delete` too
+    schema = {t.name: t.inputSchema for t in asyncio.run(server.server.list_tools())}
+    assert "show_deleted" not in (schema.get("list_directory") or {}).get("properties", {})

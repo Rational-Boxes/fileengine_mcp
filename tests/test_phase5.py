@@ -28,11 +28,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "exa
 
 # The live gate lives in conftest.py — one implementation, asking what the server
 # actually needs (a verified `mcp` key:secret) rather than an LDAP password bind.
-from conftest import live, needs_delete  # noqa: E402
+from conftest import live, cleanup  # noqa: E402
 
 
 @live
-@needs_delete
 def test_example_agent_recovers_via_time_travel():
     import agent_demo
     from fileengine_mcp import server

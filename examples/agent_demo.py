@@ -74,8 +74,14 @@ async def run(srv) -> dict:
             "recovered_ok": recovered == good and clobbered != good and time_travelled == good,
         }
     finally:
-        srv.mf.remove(doc)
-        srv.mf.remove(work)
+        # Best-effort. This door's service credential holds no `delete`
+        # capability, so tidying up is usually refused — which is the guarantee
+        # the demo is showing off, and no reason for it to end in a traceback.
+        for uid in (doc, work):
+            try:
+                srv.mf.remove(uid)
+            except Exception:  # noqa: BLE001 - housekeeping, not the demo
+                pass
 
 
 def main() -> None:

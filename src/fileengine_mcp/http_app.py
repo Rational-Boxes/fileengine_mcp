@@ -264,9 +264,6 @@ async def _metrics_endpoint(request: Request) -> PlainTextResponse:
             m.gauge("fileengine_mcp_read_only",
                     "1 when the server refuses every mutating tool",
                     1 if getattr(config, "read_only", False) else 0)
-            m.gauge("fileengine_mcp_allow_delete",
-                    "1 when the (reversible) delete/undelete tools are enabled",
-                    1 if getattr(config, "allow_delete", False) else 0)
 
         sessions = getattr(app.state, "mcp_session_manager", None)
         if sessions is not None and hasattr(sessions, "__len__"):

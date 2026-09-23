@@ -23,9 +23,18 @@ The surface is built around the recoverability guarantee (see DESIGN.md):
 - Read/browse tools and version-aware resources are always available.
 - Write tools are **append-only** (every write adds a version; restore adds a
   version) and are hidden when ``MCP_READ_ONLY`` is set.
-- Soft delete / undelete are reversible and gated behind ``MCP_ALLOW_DELETE``.
-- Version culling (PurgeOldVersions) and hard delete are **never** exposed,
-  under any flag or role."""
+- Nothing that REMOVES is exposed: no soft delete, no undelete, no with-deleted
+  listing, no hard delete, and no version culling — under any flag or role.
+
+That last line is not a convention this module keeps. The service credential this
+door presents to the core holds ``read write restore`` and nothing else, so the
+core refuses every removal RPC to it whatever is written here. The surface is cut
+to match that set exactly, which is the point of this file's half of the
+arrangement: a tool the matrix can only ever answer with PERMISSION_DENIED is
+worse than an absent one, because an agent reads its presence as a capability and
+retries. ``restore_version`` stays because RestoreToVersion *appends* a version
+row pointing at the older payload and removes nothing — it is a write, and it is
+the agent's only way back from its own bad one."""
 import base64
 import functools
 import inspect
@@ -223,8 +232,8 @@ def guarded(tool_name: str):
 
 
 # Confirmation hints for MCP hosts. Reads are read-only; writes are mutating but
-# (by design) recoverable, so none is truly "destructive" — only soft_delete is
-# flagged so hosts prompt, even though it too is reversible via undelete.
+# (by design) recoverable, so none is truly "destructive" — every one of them
+# appends to a history this door cannot prune.
 _READ_HINT = ToolAnnotations(readOnlyHint=True)
 _WRITE_HINTS = {
     "create_directory": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
@@ -236,22 +245,24 @@ _WRITE_HINTS = {
     "move": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
     "copy": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
     "restore_version": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
-    "soft_delete": ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),
-    "undelete": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
 }
 
 
 @server.tool(annotations=_READ_HINT)
 @guarded("list_directory")
-def list_directory(uid: str = "root", show_deleted: bool = False) -> list[dict]:
+def list_directory(uid: str = "root") -> list[dict]:
     """List the contents of a directory by UID.
 
-    Use ``root`` (or the all-zeros UUID) for the filesystem root. Set
-    ``show_deleted`` to include soft-deleted entries (useful before ``undelete``).
-    Returns each entry's uid, name, type (file|directory), size,
-    version_count, and created_at/modified_at (ctime/mtime, ISO 8601 UTC).
-    Long listings are capped at ``MCP_MAX_RESULTS`` entries."""
-    entries = _mf().dir(_norm_uid(uid), show_deleted=show_deleted)
+    Use ``root`` (or the all-zeros UUID) for the filesystem root. Returns each
+    entry's uid, name, type (file|directory), size, version_count, and
+    created_at/modified_at (ctime/mtime, ISO 8601 UTC). Deleted entries are not
+    listed. Long listings are capped at ``MCP_MAX_RESULTS`` entries."""
+    # No `show_deleted`: that selects ListDirectoryWithDeleted, which the core
+    # classifies under the `delete` capability alongside RemoveFile and
+    # UndeleteFile — "a service that cannot delete has no reason to enumerate or
+    # restore what was deleted". This door holds no such capability, so the
+    # parameter could only ever produce PERMISSION_DENIED.
+    entries = _mf().dir(_norm_uid(uid))
     rows = [
         {
             "uid": e.uid,
@@ -596,36 +607,25 @@ def copy(uid: str, destination_parent_uid: str) -> bool:
 def restore_version(uid: str, version: str) -> dict:
     """Restore a file to a prior version (from list_versions). This is
     **append-only**: it adds a new version equal to the chosen one; nothing is
-    overwritten or lost, so it is always itself reversible."""
+    overwritten or lost, so it is always itself reversible.
+
+    This is the undo for a bad ``write_file``, and the only one an agent has —
+    there is no delete on this door to take a mistake away with."""
     restored = _mf().restore_to_version(_norm_uid(uid), version)
     return {"uid": uid, "restored_from": version, "new_version": restored}
 
 
-# Soft delete / undelete — reversible, but gated behind MCP_ALLOW_DELETE.
-@guarded("soft_delete")
-def soft_delete(uid: str) -> bool:
-    """Soft-delete (hide) a file or directory. Reversible with ``undelete``:
-    the entity and its full version history persist. No hard delete and no
-    version culling is ever performed."""
-    return bool(_mf().remove(_norm_uid(uid)))
-
-
-@guarded("undelete")
-def undelete(uid: str) -> bool:
-    """Restore a soft-deleted file (pairs with ``soft_delete``)."""
-    return bool(_mf().undelete_file(_norm_uid(uid)))
-
-
+# There is deliberately no soft_delete/undelete here, and no flag that adds one.
+# See the module docstring: the credential holds no `delete`, so such a tool
+# could not succeed, and an agent offered a tool that always fails will keep
+# reaching for it. Removal is a person's decision, made through the web UI or the
+# REST door, which authenticate a human and can be held to it.
 _WRITE_TOOLS = (create_directory, create_file, write_file, set_metadata,
                 delete_metadata, rename, move, copy, restore_version)
-_DELETE_TOOLS = (soft_delete, undelete)
 
 if not config.read_only:
     for _fn in _WRITE_TOOLS:
         server.add_tool(_fn, annotations=_WRITE_HINTS.get(_fn.__name__))
-    if config.allow_delete:
-        for _fn in _DELETE_TOOLS:
-            server.add_tool(_fn, annotations=_WRITE_HINTS.get(_fn.__name__))
 
 
 def _banner(transport: str) -> None:
@@ -636,7 +636,7 @@ def _banner(transport: str) -> None:
     )
     print(
         f"FileEngine MCP server [{transport}]: {who} core={config.grpc_address} "
-        f"read_only={config.read_only} allow_delete={config.allow_delete}",
+        f"read_only={config.read_only} (append-only: no delete/cull on this door)",
         file=sys.stderr,
     )
 

@@ -67,42 +67,85 @@ import pytest  # noqa: E402 — after the path setup above
 live = pytest.mark.skipif(bool(_LIVE_REASON), reason=_LIVE_REASON or "live")
 
 
-# ── the delete capability ───────────────────────────────────────────────────
+# ── removal is not on this door ─────────────────────────────────────────────
 #
-# MCP's service identity holds `read write` and nothing else, ON PURPOSE. The
-# launcher states the reasoning where it issues the credentials: "mcp gets neither
-# `delete` nor `destroy`, so 'append-only, recoverable' becomes a property of the
-# core rather than of MCP's own restraint." The core therefore refuses
-# RemoveFile/UndeleteFile/RestoreVersion to this identity with PERMISSION_DENIED
-# — "service lacks the 'delete' capability" — however the tools are gated above.
+# MCP's service identity holds `read write restore` and NOTHING that removes, on
+# purpose. The deployment states the reasoning where it grants the capabilities
+# (scripts/Ansible/roles/service_auth/defaults/main.yml, and the dev launcher):
+# "append-only, recoverable" is a property of the core, not of MCP's restraint.
+# The tool surface is cut to match — there is no soft_delete, no undelete, no
+# with-deleted listing — so nothing below tests one.
 #
-# Tests that soft-delete, undelete or restore (several only as CLEANUP) cannot
-# pass under that matrix. They are skipped with the reason rather than failing as
-# if the feature were broken, and test_append_only_is_enforced_by_the_core below
-# asserts the refusal itself, which is the property the matrix exists to create
-# and which nothing tested before.
-def _delete_capability() -> bool:
+# What the tests still want is to tidy up after themselves, and mostly they
+# cannot: RemoveFile/RemoveDirectory are refused for this identity. That used to
+# skip seventeen tests whose actual subject was something else entirely (an
+# append-only write, a byte cap, an audit record), because they happened to end
+# with two `mf.remove` calls. `cleanup()` attempts the removal where the
+# deployment allows it and accepts the refusal where it does not, so a test is
+# gated on what it measures and not on how it tidies.
+def _has_delete() -> bool:
+    """Does this deployment's mcp credential hold `delete` after all?
+
+    Probed against a uid that does not exist, so this creates nothing. The
+    capability check runs in the core's interceptor BEFORE the handler, so a
+    credential without it is refused with "... capability" while one with it gets
+    as far as a not-found. The earlier probe made a directory and removed it,
+    which on the deployment it was written for left one behind on every run —
+    unremovable for exactly the reason being probed.
+    """
     if _LIVE_REASON:
         return False
     try:
-        import os as _os
+        import uuid as _uuid
         from fileengine_mcp import server
-        d = server.mf.mkdir("", f"mcp_capprobe_{_os.getpid()}")
+        server.mf.remove(str(_uuid.uuid4()))
+        return True                      # removed a uid that did not exist: odd, but permitted
+    except Exception as e:               # noqa: BLE001 - the message is the answer
+        return "capability" not in str(e).lower()
+
+
+HAS_DELETE = _has_delete()
+
+
+_FIXTURE_ROOT_NAME = "mcp-test-fixtures"
+_fixture_root = None
+
+
+def fixtures_root() -> str:
+    """The uid of the one directory every live test builds its fixtures inside.
+
+    Removal is not on this door, so a test that creates a fixture cannot take it
+    away again — `cleanup()` below is a no-op wherever the credential holds no
+    `delete`, which is every correctly configured deployment. Creating fixtures
+    at the tenant root therefore meant a dozen new folders in the top-level
+    listing on every live run, permanently. They go in here instead: one folder,
+    reused across runs, that an operator can see for what it is and purge with
+    the CLI (`fileengine_cli` as an identity that may delete).
+    """
+    global _fixture_root
+    if _fixture_root is not None:
+        return _fixture_root
+    from fileengine_mcp import server
+    for e in server.mf.dir(""):
+        if e.name == _FIXTURE_ROOT_NAME and e.is_container:
+            _fixture_root = e.uid
+            return _fixture_root
+    _fixture_root = server.mf.mkdir("", _FIXTURE_ROOT_NAME)
+    return _fixture_root
+
+
+def cleanup(*uids) -> None:
+    """Best-effort tidy-up of fixtures, in creation-reverse order.
+
+    Never fails a test: on a door with no `delete` capability the leftovers are
+    the cost of the guarantee, and a test that passed must not then fail in its
+    own housekeeping.
+    """
+    if not HAS_DELETE:
+        return
+    from fileengine_mcp import server
+    for uid in uids:
         try:
-            server.mf.remove(d)
-            return True
-        except Exception:
-            return False
-    except Exception:
-        return False
-
-
-HAS_DELETE = _delete_capability()
-
-needs_delete = pytest.mark.skipif(
-    not HAS_DELETE,
-    reason="the mcp service identity holds no 'delete' capability — by deployment "
-           "design (see scripts/start_backend_services.sh: append-only is enforced "
-           "by the core). Grant it with `fileengine_cli service grant mcp delete` to "
-           "run these.",
-)
+            server.mf.remove(uid)
+        except Exception:  # noqa: BLE001 - housekeeping, never the subject
+            pass

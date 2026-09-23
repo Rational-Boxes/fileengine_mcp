@@ -11,7 +11,6 @@
         "FILEENGINE_MCP_PASSWORD": "CHANGEME",
         "FILEENGINE_LDAP_ENDPOINT": "ldap://localhost:1389",
         "MCP_READ_ONLY": "0",
-        "MCP_ALLOW_DELETE": "0",
         "MCP_AUDIT_LOG_FILE": "/var/log/fileengine-mcp-audit.log"
       }
     }

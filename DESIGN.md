@@ -32,7 +32,6 @@ from the agent's side**:
 |---|---|---|
 | `write_file` (bad content) | `read_version` / `restore_version` to a prior timestamp | a new version is appended; the previous bytes remain |
 | `restore_version` | `restore_version` to any other version | restore is itself append-only — it adds a version, never overwrites |
-| `soft_delete` | `undelete` | delete only hides; the entity and its versions persist |
 | `rename` | `rename` back | name change only; reversible |
 | `move` | `move` back | parent change only; reversible |
 | `set_metadata` / `delete_metadata` | re-set from a prior versioned value | metadata is versioned; content untouched |
@@ -42,9 +41,10 @@ This is enforced **structurally**, not by permission checks:
 - **`PurgeOldVersions` (version culling) is never exposed** — no tool, resource,
   or parameter prunes/compacts versions, for *any* agent identity including
   `system_admin`. The version history cannot be shortened through this server.
-- **No hard delete is exposed** — the only delete is the core's *soft* delete
-  (`RemoveFile`/`RemoveDirectory`), reversible via `undelete`, and even that is
-  config-gated off by default (§6).
+- **No delete of any kind is exposed** — not hard delete, and not the core's
+  reversible *soft* delete (`RemoveFile`/`RemoveDirectory`) either. The table
+  above has no "if an agent deletes…" row because there is no such action on
+  this door (§6).
 - **Writes and restores are append-only** — they extend history; they never
   overwrite or erase.
 
@@ -139,9 +139,10 @@ LDAP connection config mirrors the other services
 - **Guardrails for agents:** per-call read/write size caps, a max-results cap on
   listings, and optional subtree (UID) allow-listing to sandbox an agent —
   layered *on top of* the LDAP/ACL decision, never replacing it.
-- **Confirmation hints:** mutating tools (`write_file`, `move`, `soft_delete`)
+- **Confirmation hints:** mutating tools (`write_file`, `move`, `restore_version`)
   carry `destructiveHint`/`idempotentHint`; reads carry `readOnlyHint`, so MCP
-  hosts can prompt the user.
+  hosts can prompt the user. None is flagged destructive: none of them can take
+  anything away.
 
 ---
 
@@ -165,7 +166,7 @@ UUID. Each tool has a JSON-Schema input and structured output, with annotations.
 ### Read / browse (always available)
 | Tool | Maps to | Notes |
 |---|---|---|
-| `list_directory(uid, show_deleted=false)` | `dir` | entries (uid, name, type, size, version_count) |
+| `list_directory(uid)` | `dir` | entries (uid, name, type, size, version_count); deleted entries are not listed — `ListDirectoryWithDeleted` is a `delete`-capability RPC |
 | `stat(uid)` | `stat` | type/size/owner/parent/current version |
 | `exists(uid)` | `entity_exists` | |
 | `read_file(uid, as="text"\|"base64")` | `get` | current content; text or base64 for binary |
@@ -187,15 +188,30 @@ UUID. Each tool has a JSON-Schema input and structured output, with annotations.
 | `restore_version(uid, version)` | `restore_to_version` | **append-only restore** — adds a new version |
 | `delete_metadata(uid, key)` | `delete_metadata_value` | metadata only; not a version op |
 
-### Optional, config-gated (default OFF)
-| Tool | Maps to | Why gated |
-|---|---|---|
-| `soft_delete(uid)` | `remove` | reversible hide; off unless `MCP_ALLOW_DELETE=1` |
-| `undelete(uid)` | `undelete_file` | pairs with soft_delete |
+### Not exposed, and not exposable
+There is no delete tool and no setting that adds one. This used to be a
+config-gated pair (`soft_delete`/`undelete`, off unless `MCP_ALLOW_DELETE=1`),
+and the flag was removed rather than re-defaulted, because the choice it offered
+did not exist:
+
+> The service credential this door presents to the core is issued
+> **`read write restore`**. `RemoveFile`, `RemoveDirectory`, `UndeleteFile` and
+> `ListDirectoryWithDeleted` are all classified under the core's `delete`
+> capability, so they are refused in the interceptor, before any handler runs —
+> `PERMISSION_DENIED: service lacks the 'delete' capability`. Turning the flag on
+> published two tools that could only answer with that.
+
+`restore` is in the credential and is not an exception to it: `RestoreToVersion`
+inserts a *new* version row pointing at the older payload and removes nothing. It
+is a write, and it is the agent's only way back from a bad one.
+
+An agent that genuinely needs something removed should say so; removal is a
+person's decision, taken through the web UI or the REST door, which authenticate
+a human and can hold them to it.
 
 ### Deliberately excluded
 - **`purge_old_versions` / any version-culling** — not exposed under any flag or
-  role. (§1)
+  role, and `destroy` is not in the credential either. (§1)
 - Role/ACL administration (`create_role`, `grant_permission`, …) and admin ops
   (`trigger_sync`) — out of scope for an agent-facing surface; manage those via
   the CLI / HTTP bridge.
@@ -235,7 +251,7 @@ directory." Low priority; ship after tools/resources.
 | 1 | Full **read** tool set + resources (`fileengine://…` incl. versions) | time-travel read of an old version via Inspector |
 | 2 | **Append-only write** tools (`create_*`, `write_file`, `restore_version`, metadata, rename/move/copy); read-only-mode flag | write creates a new version; old version still readable; **assert no purge tool exists** |
 | 3 | Streamable HTTP transport + OAuth → FileEngine identity (reuse LDAP/token); per-session tenancy | remote agent connects, scoped to its tenant |
-| 4 | Hardening: audit log, size/result caps, subtree allow-list, confirmation hints; optional soft_delete gating | guardrail tests |
+| 4 | Hardening: audit log, size/result caps, subtree allow-list, confirmation hints | guardrail tests |
 | 5 | Packaging (entry point + container), docs (README + tool reference), example agent config | example agent completes a read→write→time-travel task |
 
 ---
@@ -252,7 +268,7 @@ directory." Low priority; ship after tools/resources.
     `read_version` of an old timestamp returns the original bytes after
     subsequent writes *and* a `restore`;
   - **"undo any mistake" scenarios** each recover the prior state via tools the
-    agent has: clobbering a file → `restore_version`; `soft_delete` → `undelete`;
+    agent has: clobbering a file → `restore_version`;
     `rename`/`move` → reverse; a chaotic multi-step "agent gone wrong" sequence →
     every file rolled back to a pre-run snapshot timestamp.
 - **Agent eval (optional):** a scripted Claude agent performing a multi-step
