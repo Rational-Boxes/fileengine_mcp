@@ -1,3 +1,4 @@
+import pytest
 # Copyright (C) 2026 James Hickman
 #
 # This program is free software: you can redistribute it and/or modify
@@ -149,3 +150,32 @@ def cleanup(*uids) -> None:
             server.mf.remove(uid)
         except Exception:  # noqa: BLE001 - housekeeping, never the subject
             pass
+
+
+@pytest.fixture(autouse=True)
+def _admitting_tenant_gate():
+    """Give the tenant-state gate a source that admits, for tests about OTHER things.
+
+    §3.4c's gate now sits in resolve_identity and FAILS CLOSED, so without this
+    every identity test would refuse for want of a core — and would look like an
+    authentication bug rather than an unwired gate. The gate's own behaviour is
+    tested in test_tenant_state.py, including that an unwired gate refuses.
+
+    Autouse so a new test cannot forget it and mistake a closed gate for broken
+    auth; a test that wants the gate closed overrides the source itself.
+    """
+    from fileengine_mcp.http_auth import TENANT_GATE
+    from fileengine_mcp.tenant_state import TenantStateGate
+
+    class _Live:
+        def tenant_state(self, tenant):
+            return {"found": True, "state": "live", "admits": True}
+
+    saved_source = TENANT_GATE._source
+    saved_cache = dict(TENANT_GATE._cache)
+    TENANT_GATE.set_source(_Live())
+    TENANT_GATE._cache.clear()
+    yield TENANT_GATE
+    TENANT_GATE._source = saved_source
+    TENANT_GATE._cache.clear()
+    TENANT_GATE._cache.update(saved_cache)

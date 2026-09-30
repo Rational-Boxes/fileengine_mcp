@@ -26,9 +26,13 @@ The tenant is per-session: taken from the ``X-Tenant`` header or the request's
 subdomain, falling back to the configured default — independent of the user's
 LDAP entry, so one account can act across tenants."""
 import base64
+import logging
 from dataclasses import replace
 
 from .ldap_auth import Identity, resolve_roles
+from .tenant_state import TenantStateGate
+
+log = logging.getLogger("fileengine_mcp.http_auth")
 from .service_cred_client import get_verifier
 from .token_store import TokenStore
 
@@ -66,16 +70,28 @@ def extract_tenant(headers: dict, host: str, default: str) -> str:
     return default
 
 
+#: The tenant-state gate for this door. Module level so its cache is shared
+#: across requests; the source is injected at startup (and by the tests).
+TENANT_GATE = TenantStateGate()
+
+
 def resolve_identity(auth_header: str, tenant: str, config, store: TokenStore) -> Identity | None:
     """Resolve an Authorization header to an authenticated Identity scoped to
-    ``tenant``, or ``None`` if authentication fails / no credentials are given."""
+    ``tenant``, or ``None`` if authentication fails / no credentials are given.
+
+    §3.4c: the tenant's lifecycle state is checked here, at the ONE point both
+    credential paths pass through. Only `live` admits; everything else refuses,
+    and so does a lookup that could not be completed. Putting it here rather than
+    in each branch is deliberate — a Bearer session must stop working when its
+    tenant is suspended, not merely a fresh Basic login.
+    """
     if not auth_header:
         return None
     if auth_header.startswith("Bearer "):
         identity = store.resolve(auth_header[len("Bearer "):].strip())
         if identity is None:
             return None
-        return replace(identity, tenant=tenant)
+        return _gated(replace(identity, tenant=tenant), tenant)
     basic = decode_basic(auth_header)
     if basic is None:
         return None
@@ -88,4 +104,23 @@ def resolve_identity(auth_header: str, tenant: str, config, store: TokenStore) -
     identity = resolve_roles(config, uid)
     if not identity.authenticated:
         return None
-    return replace(identity, tenant=tenant)
+    return _gated(replace(identity, tenant=tenant), tenant)
+
+
+def _gated(identity: Identity | None, tenant: str) -> Identity | None:
+    """Apply the tenant-state gate to an otherwise-authenticated identity.
+
+    Returns None when the tenant does not admit, so the caller's existing
+    "authentication failed" path handles it. The REASON is logged rather than
+    returned: this door speaks MCP, not HTTP semantics, and the distinct-status
+    treatment §3.4c property 4 asks for belongs where there is a status to set.
+    That is a real gap for a person debugging an MCP client, and it is recorded
+    as one rather than papered over.
+    """
+    if identity is None:
+        return None
+    ok, reason = TENANT_GATE.admits(tenant)
+    if not ok:
+        log.warning("MCP door refused %s: %s", identity.user or "<unknown>", reason)
+        return None
+    return identity

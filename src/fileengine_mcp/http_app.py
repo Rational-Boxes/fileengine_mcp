@@ -278,12 +278,47 @@ async def _metrics_endpoint(request: Request) -> PlainTextResponse:
         media_type=_metrics.CONTENT_TYPE)
 
 
+def _wire_tenant_gate(config) -> None:
+    """Point the tenant-state gate at the core.
+
+    A dedicated, minimal client: this read needs no user and no roles, and the
+    core does not gate GetTenantState on the end user precisely because a door
+    asks it before deciding whom to admit.
+    """
+    from .http_auth import TENANT_GATE
+
+    class _CoreState:
+        def tenant_state(self, tenant: str) -> dict:
+            from fileengine import ManagedFiles
+
+            mf = ManagedFiles(user_name="mcp", user_roles=[],
+                              server_address=config.grpc_address, tenant=tenant)
+            try:
+                return mf.tenant_state(tenant)
+            finally:
+                try:
+                    mf.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    TENANT_GATE.set_source(_CoreState())
+
+
 def build_app(server, config, ttl_seconds: int = 3600):
     """Build the Streamable-HTTP ASGI app for an MCP ``server`` + ``config``."""
     app = server.streamable_http_app()
     store = TokenStore(ttl_seconds)
     app.state.token_store = store
     app.state.config = config
+
+    # §3.4c: give the tenant-state gate a way to ask the core, or it refuses
+    # everything. Wired at startup rather than per request so its cache is shared,
+    # and as a SERVICE identity read — the question is asked before any user is
+    # resolved, which is the whole point of a login check.
+    #
+    # Unwired, TenantStateGate refuses rather than allowing, so a deployment that
+    # skipped this is closed rather than silently ungated.
+    _wire_tenant_gate(config)
     app.router.routes.append(Route("/auth/token", _token_endpoint, methods=["POST"]))
     app.router.routes.append(Route("/whoami", _whoami, methods=["GET"]))
     # Monitoring. Unauthenticated (a scraper has no credential) and IP-guarded in
