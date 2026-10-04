@@ -27,7 +27,7 @@ subdomain, falling back to the configured default — independent of the user's
 LDAP entry, so one account can act across tenants."""
 import base64
 import logging
-from dataclasses import replace
+import os
 
 from .ldap_auth import Identity, resolve_roles
 from .tenant_state import TenantStateGate
@@ -51,21 +51,31 @@ def decode_basic(header_value: str) -> tuple[str, str] | None:
     return user, password
 
 
+def _reserved_labels() -> frozenset:
+    """Host labels that are never a tenant, matching the bridge's
+    ``isReservedTenantLabel``; ``login`` (or ``LOGIN_SUBDOMAIN``) is the shared
+    sign-in origin. Read per call so a test or a restart picks up the setting."""
+    login = (os.environ.get("LOGIN_SUBDOMAIN") or "login").strip().lower()
+    return frozenset({"www", "api", "localhost", "mcp", login})
+
+
 def extract_tenant(headers: dict, host: str, default: str) -> str:
     """Resolve the request tenant: explicit ``X-Tenant`` wins, else a subdomain
     label of the Host header, else the configured default.
 
     A bare host or one whose first label looks like a public/base name
     (``www``, ``api``, ``localhost``, ``mcp``) yields the default."""
-    explicit = headers.get("x-tenant")
-    if explicit:
-        return explicit.strip()
+    reserved = _reserved_labels()
+    explicit = (headers.get("x-tenant") or "").strip()
+    # A reserved name in X-Tenant is ignored, not obeyed, as the bridge does.
+    if explicit and explicit.lower() not in reserved:
+        return explicit
     host = (host or "").split(":", 1)[0]
     labels = host.split(".")
     if len(labels) >= 3:  # sub.domain.tld
         # Tenant ids contain no hyphen; <tenant>-<interface> resolves to the tenant.
         first = labels[0].strip().lower().split("-", 1)[0]
-        if first and first not in ("www", "api", "localhost", "mcp"):
+        if first and first not in reserved:
             return first
     return default
 
@@ -91,7 +101,15 @@ def resolve_identity(auth_header: str, tenant: str, config, store: TokenStore) -
         identity = store.resolve(auth_header[len("Bearer "):].strip())
         if identity is None:
             return None
-        return _gated(replace(identity, tenant=tenant), tenant)
+        # A token is bound to the tenant it was issued for, with the roles held
+        # THERE. It used to be re-stamped with whatever tenant this request
+        # named, so a token minted in A, sent with `X-Tenant: B`, acted in B
+        # carrying A's roles. Refuse instead, as the other doors do.
+        if identity.tenant != tenant:
+            log.warning("MCP door refused %s: token issued for tenant %r used for %r",
+                        identity.user or "<unknown>", identity.tenant, tenant)
+            return None
+        return _gated(identity, tenant)
     basic = decode_basic(auth_header)
     if basic is None:
         return None
@@ -101,10 +119,11 @@ def resolve_identity(auth_header: str, tenant: str, config, store: TokenStore) -
     uid = get_verifier(config).verify(key_id, secret, tenant, "mcp")
     if uid is None:
         return None
-    identity = resolve_roles(config, uid)
+    # Roles held in the tenant this request is for, not the configured one.
+    identity = resolve_roles(config, uid, tenant)
     if not identity.authenticated:
         return None
-    return _gated(replace(identity, tenant=tenant), tenant)
+    return _gated(identity, tenant)
 
 
 def _gated(identity: Identity | None, tenant: str) -> Identity | None:
