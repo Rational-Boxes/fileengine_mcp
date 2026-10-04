@@ -27,7 +27,6 @@ authenticates itself. Identity is always LDAP-derived and forwarded to the core,
 which remains the ACL enforcement point."""
 import json
 import os
-from dataclasses import replace
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
@@ -165,10 +164,11 @@ async def _token_endpoint(request: Request) -> JSONResponse:
     uid = get_verifier(config).verify(key_id, secret, tenant, "mcp")
     if uid is None:
         return JSONResponse({"error": "authentication failed"}, status_code=401)
-    identity = resolve_roles(config, uid)
+    # Roles held in the tenant the token is being issued for, and the token is
+    # bound to that tenant (http_auth refuses it anywhere else).
+    identity = resolve_roles(config, uid, tenant)
     if not identity.authenticated:
         return JSONResponse({"error": "authentication failed"}, status_code=401)
-    identity = replace(identity, tenant=tenant)
     token = store.issue(identity)
     return JSONResponse({"access_token": token, "token_type": "bearer", "expires_in": store.ttl})
 

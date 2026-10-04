@@ -87,16 +87,25 @@ def authenticate(cfg, username: str, password: str) -> Identity:
     return ident
 
 
-def resolve_roles(cfg, username: str) -> Identity:
+def resolve_roles(cfg, username: str, tenant: Optional[str] = None) -> Identity:
     """Resolve a user's roles WITHOUT a password bind (for key:secret auth, §16):
     a service-bind search by uid + group-membership roles. ``authenticated`` is True
-    iff the uid exists. Mirrors :func:`authenticate`'s replica failover."""
-    ident = Identity(user=username, tenant=cfg.tenant)
+    iff the uid exists. Mirrors :func:`authenticate`'s replica failover.
+
+    ``tenant`` is the tenant the REQUEST is for, and the roles are the ones held
+    there. It defaults to the configured tenant (the stdio transport, which is
+    pinned). The HTTP transport must pass it: it serves whichever tenant the
+    request names, and resolving in the configured tenant then stamping the
+    request's tenant on the result handed a user their roles from ANOTHER tenant
+    — an administrator of the configured tenant acted as one everywhere, and a
+    member of only the requested tenant could not sign in at all."""
+    tenant = tenant or cfg.tenant
+    ident = Identity(user=username, tenant=tenant)
     if not username:
         return ident
     for uri, is_primary in _ldap_targets(cfg):
         try:
-            result = _resolve_roles_against(uri, cfg, username)
+            result = _resolve_roles_against(uri, cfg, username, tenant)
             if is_primary:
                 _breaker(cfg).reset()
             return result
@@ -107,10 +116,11 @@ def resolve_roles(cfg, username: str) -> Identity:
     return ident
 
 
-def _resolve_roles_against(uri: str, cfg, username: str) -> Identity:
+def _resolve_roles_against(uri: str, cfg, username: str,
+                           tenant: Optional[str] = None) -> Identity:
     """Service-bind role resolution against one directory (no user bind). Raises
     :class:`_ServerUnreachable` if the directory can't be reached."""
-    ident = Identity(user=username, tenant=cfg.tenant)
+    ident = Identity(user=username, tenant=tenant or cfg.tenant)
     server = Server(uri, get_info=ALL)
     try:
         svc = Connection(server, cfg.ldap_bind_dn, cfg.ldap_bind_password, auto_bind=True)

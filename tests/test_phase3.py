@@ -76,7 +76,6 @@ def test_extract_tenant():
 
 
 def test_resolve_identity_bearer_path_no_ldap():
-    from dataclasses import replace
     from fileengine_mcp.http_auth import resolve_identity
     from fileengine_mcp.ldap_auth import Identity
     from fileengine_mcp.token_store import TokenStore
@@ -84,8 +83,12 @@ def test_resolve_identity_bearer_path_no_ldap():
     ident = Identity(user="svc", roles=["readers"], tenant="default", authenticated=True)
     tok = store.issue(ident)
 
-    out = resolve_identity(f"Bearer {tok}", "acme", config=None, store=store)
-    assert out == replace(ident, tenant="acme")            # tenant is per-session
+    out = resolve_identity(f"Bearer {tok}", "default", config=None, store=store)
+    assert out == ident                                    # used in its own tenant
+    # A token is bound to the tenant it was issued for. It used to be re-stamped
+    # with the request's tenant, so a token minted in one tenant acted in any
+    # other, carrying the first tenant's roles.
+    assert resolve_identity(f"Bearer {tok}", "acme", None, store) is None
     assert resolve_identity("Bearer bad", "acme", None, store) is None
     assert resolve_identity("", "acme", None, store) is None
 

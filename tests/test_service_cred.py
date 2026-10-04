@@ -55,13 +55,18 @@ def test_resolve_identity_uses_verifier_not_password(monkeypatch):
             return "alice" if secret == "good" else None
 
     monkeypatch.setattr(http_auth, "get_verifier", lambda c: FakeVerifier())
-    monkeypatch.setattr(http_auth, "resolve_roles",
-                        lambda c, uid: Identity(user=uid, tenant=c.tenant,
-                                                roles=["users"], authenticated=True))
+    def fake_roles(c, uid, tenant=None):
+        calls["roles"] = tenant
+        return Identity(user=uid, tenant=tenant or c.tenant,
+                        roles=["users"], authenticated=True)
+
+    monkeypatch.setattr(http_auth, "resolve_roles", fake_roles)
 
     ok = http_auth.resolve_identity(_basic("fesk_1", "good"), "acme", cfg, store=None)
     assert ok is not None and ok.user == "alice" and ok.tenant == "acme"
     assert calls["verify"] == ("fesk_1", "good", "acme", "mcp")  # scope mcp, tenant threaded
+    # Roles are looked up in the REQUEST's tenant, not the configured "default".
+    assert calls["roles"] == "acme"
 
     bad = http_auth.resolve_identity(_basic("fesk_1", "nope"), "acme", cfg, store=None)
     assert bad is None  # a wrong secret (or a directory password) is rejected
