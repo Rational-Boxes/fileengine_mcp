@@ -48,6 +48,12 @@ def test_list_directory_root():
     from fileengine_mcp import server
     entries = server.list_directory("root")
     assert isinstance(entries, list)
+    # A root past MCP_MAX_RESULTS ends with ONE truncation notice (server.py
+    # cap_results). A long-lived dev tenant's root is that big; the notice is
+    # by design and is only ever the last row, with no uid to act on.
+    if entries and entries[-1]["type"] == "notice":
+        assert entries[-1]["uid"] == "" and "truncated" in entries[-1]["name"]
+        entries = entries[:-1]
     for e in entries:
         assert {"uid", "name", "type", "size", "version_count"} <= set(e)
         assert e["type"] in ("file", "directory")
